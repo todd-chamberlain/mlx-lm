@@ -170,7 +170,7 @@ class GRPCClientBase:
         timeout: float = 30.0,
         max_receive_message_length: int = 4 * 1024 * 1024,  # 4MB
         max_send_message_length: int = 4 * 1024 * 1024,     # 4MB
-        enable_keepalive: bool = True
+        enable_keepalive: bool = False  # Disabled to avoid too_many_pings error
     ):
         self.target = target
         self.retry_config = retry_config or RetryConfig()

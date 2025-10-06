@@ -19,7 +19,12 @@ STUDIO2_HOST="mac-studio-2"
 PROJECT_DIR="$(pwd)"
 MODEL_NAME="Llama-3.2-3B-Instruct-4bit"
 MODEL_PATH="~/models/${MODEL_NAME}"
-STUDIO1_IP=$(ipconfig getifaddr en0)
+# Use Thunderbolt bridge interface (10.201.x.x network)
+STUDIO1_IP=$(ifconfig | grep "inet 10.201" | awk '{print $2}' | head -1)
+if [ -z "$STUDIO1_IP" ]; then
+    # Fallback to en0 if Thunderbolt not found
+    STUDIO1_IP=$(ipconfig getifaddr en0)
+fi
 
 echo -e "${CYAN}${BOLD}"
 echo "╔════════════════════════════════════════════════════════════╗"
