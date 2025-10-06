@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional
 import os
 
 from .service import CoordinatorServer
+from .metrics_server import MetricsServer
 from config.base import load_config
 
 
@@ -32,6 +33,7 @@ class CoordinatorApp:
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or self._load_default_config()
         self.server: Optional[CoordinatorServer] = None
+        self.metrics_server: Optional[MetricsServer] = None
         self._shutdown_event = asyncio.Event()
         
         logger.info("CoordinatorApp initialized")
@@ -43,6 +45,10 @@ class CoordinatorApp:
                 'port': int(os.getenv('COORDINATOR_PORT', '50051')),
                 'max_workers': int(os.getenv('COORDINATOR_MAX_WORKERS', '10')),
                 'enable_reflection': os.getenv('ENABLE_GRPC_REFLECTION', 'false').lower() == 'true'
+            },
+            'metrics': {
+                'port': int(os.getenv('METRICS_PORT', '9091')),
+                'enabled': os.getenv('ENABLE_METRICS', 'true').lower() == 'true'
             },
             'worker_pool': {
                 'heartbeat_timeout': float(os.getenv('HEARTBEAT_TIMEOUT', '30.0')),
@@ -65,12 +71,18 @@ class CoordinatorApp:
             # Create and configure server
             server_config = self.config['server']
             worker_pool_config = self.config['worker_pool']
+            metrics_config = self.config['metrics']
             
             self.server = CoordinatorServer(
                 port=server_config['port'],
                 max_workers=server_config['max_workers'],
                 worker_pool_config=worker_pool_config
             )
+            
+            # Start metrics server if enabled
+            if metrics_config['enabled']:
+                self.metrics_server = MetricsServer(port=metrics_config['port'])
+                await self.metrics_server.start()
             
             # Set up signal handlers
             self._setup_signal_handlers()
@@ -88,6 +100,9 @@ class CoordinatorApp:
         
         if self.server:
             await self.server.stop()
+        
+        if self.metrics_server:
+            await self.metrics_server.stop()
         
         logger.info("Coordinator application stopped")
     

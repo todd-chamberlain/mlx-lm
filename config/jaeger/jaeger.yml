@@ -1,0 +1,108 @@
+# Jaeger configuration for MLX Distributed Inference
+
+# Collector configuration
+collector:
+  # gRPC endpoint for receiving spans
+  grpc-server:
+    host-port: 0.0.0.0:14250
+  
+  # HTTP endpoint for receiving spans
+  http-server:
+    host-port: 0.0.0.0:14268
+  
+  # Zipkin HTTP endpoint (for compatibility)
+  zipkin:
+    host-port: 0.0.0.0:9411
+
+# Query service configuration
+query:
+  # HTTP server for Jaeger UI
+  http-server:
+    host-port: 0.0.0.0:16686
+  
+  # Additional UI configuration
+  ui-config: |
+    {
+      "dependencies": {
+        "dagMaxNumServices": 200,
+        "menuEnabled": true
+      },
+      "archiveEnabled": true,
+      "tracking": {
+        "gaID": "UA-000000-2",
+        "trackErrors": true
+      }
+    }
+
+# Agent configuration (if using agent deployment)
+agent:
+  # Jaeger agent server
+  http-server:
+    host-port: 0.0.0.0:5778
+  
+  # Compact thrift protocol over UDP
+  compact:
+    server-host-port: 0.0.0.0:6831
+  
+  # Binary thrift protocol over UDP
+  binary:
+    server-host-port: 0.0.0.0:6832
+
+# Storage configuration
+storage:
+  type: memory
+  
+  # For production, use Elasticsearch or Cassandra
+  # elasticsearch:
+  #   server-urls: http://elasticsearch:9200
+  #   index-prefix: jaeger
+  #   username: elastic
+  #   password: changeme
+  
+  # cassandra:
+  #   servers: cassandra:9042
+  #   keyspace: jaeger_v1_dc1
+  #   local-dc: dc1
+
+# Sampling configuration
+sampling:
+  # Default sampling strategy
+  default_strategy:
+    type: probabilistic
+    param: 1.0  # Sample 100% of traces (adjust for production)
+  
+  # Per-service sampling strategies
+  per_service_strategies:
+    - service: "mlx-api-server"
+      type: probabilistic
+      param: 1.0
+      max_traces_per_second: 100
+    
+    - service: "mlx-coordinator"
+      type: probabilistic
+      param: 1.0
+      max_traces_per_second: 200
+    
+    - service: "mlx-worker-*"
+      type: probabilistic
+      param: 0.8  # Sample 80% of worker traces
+      max_traces_per_second: 50
+
+# Metrics configuration
+metrics:
+  backend: prometheus
+  http-route: /metrics
+  namespace: jaeger
+  
+  # Additional metrics configuration
+  labels:
+    key1: value1
+    key2: value2
+
+# Logging configuration
+log-level: info
+
+# Health check configuration
+admin:
+  http:
+    host-port: 0.0.0.0:14269

@@ -1,0 +1,67 @@
+notifiers:
+  - name: slack-alerts
+    type: slack
+    uid: slack-alerts
+    org_id: 1
+    is_default: true
+    send_reminder: true
+    disable_resolve_message: false
+    frequency: "10s"
+    settings:
+      # Configure these environment variables in your deployment
+      url: "${SLACK_WEBHOOK_URL}"
+      channel: "#mlx-alerts"
+      username: "Grafana"
+      title: "MLX Inference Alert"
+      text: |
+        {{ range .Alerts }}
+        **{{ .Annotations.summary }}**
+        {{ .Annotations.description }}
+        
+        Labels: {{ range .Labels.SortedPairs }}{{ .Name }}={{ .Value }} {{ end }}
+        {{ end }}
+      iconEmoji: ":exclamation:"
+      iconUrl: ""
+      mentionUsers: ""
+      mentionGroups: ""
+      mentionChannel: ""
+      token: ""
+
+  - name: webhook-alerts
+    type: webhook
+    uid: webhook-alerts
+    org_id: 1
+    is_default: false
+    send_reminder: false
+    disable_resolve_message: false
+    frequency: "10s"
+    settings:
+      # Configure this environment variable in your deployment
+      url: "${WEBHOOK_ALERT_URL}"
+      httpMethod: "POST"
+      maxAlerts: 0
+      username: ""
+      password: ""
+      authorization_scheme: ""
+      authorization_credentials: ""
+      title: "MLX Inference Alert"
+      message: |
+        {
+          "alerts": [
+            {{ range .Alerts }}
+            {
+              "status": "{{ .Status }}",
+              "summary": "{{ .Annotations.summary }}",
+              "description": "{{ .Annotations.description }}",
+              "labels": {
+                {{ range .Labels.SortedPairs }}
+                "{{ .Name }}": "{{ .Value }}"{{ if not (last $labels) }},{{ end }}
+                {{ end }}
+              },
+              "startsAt": "{{ .StartsAt }}",
+              "endsAt": "{{ .EndsAt }}",
+              "generatorURL": "{{ .GeneratorURL }}"
+            }{{ if not (last $alerts) }},{{ end }}
+            {{ end }}
+          ]
+        }

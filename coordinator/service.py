@@ -26,6 +26,7 @@ from .models import WorkerInfo, WorkerStatus
 from .worker_selector import SelectionConfig
 from .health_monitor import HealthThresholds
 from .request_router import RequestRouter, RequestContext
+from .metrics import coordinator_metrics, GRPCMetricsInterceptor
 
 
 logger = logging.getLogger(__name__)

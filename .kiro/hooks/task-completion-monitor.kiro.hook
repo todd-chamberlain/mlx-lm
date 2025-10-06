@@ -10,7 +10,8 @@
       "coordinator/__init__.py",
       "worker/__init__.py",
       "proto/*.py",
-      "tests/test_*.py"
+      "tests/test_*.py",
+      "tasks.md"
     ]
   },
   "then": {
