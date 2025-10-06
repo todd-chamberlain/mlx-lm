@@ -24,7 +24,7 @@
     - Add message serialization/deserialization utilities
     - _Requirements: 2.3, 9.4_
 
-  - [ ]\* 2.3 Write unit tests for gRPC communication
+  - [x] 2.3 Write unit tests for gRPC communication
     - Test message validation and serialization
     - Test connection handling and error scenarios
     - Test retry logic and timeout handling
@@ -64,7 +64,7 @@
     - Implement request tracking and cleanup
     - _Requirements: 3.3, 9.1, 9.4_
 
-  - [ ]\* 3.5 Write coordinator service unit tests
+  - [x] 3.5 Write coordinator service unit tests
     - Test worker registration and deregistration flows
     - Test worker selection algorithm with various scenarios
     - Test health monitoring and failure detection

@@ -6,12 +6,11 @@
   "when": {
     "type": "fileEdited",
     "patterns": [
-      ".kiro/hooks/task-implementation-completion/status",
-      ".kiro/specs/mlx-distributed-inference/tasks.md"
+      "git.next.hook"
     ]
   },
   "then": {
     "type": "askAgent",
-    "prompt": "The Task Implementation Completion hook has finished. Please select the next remaining unfinished task from the task list and continue implementing the stats functionality until completion. Review the current progress and identify what still needs to be done continuing our work."
+    "prompt": "The Task Implementation Completion hook has finished. Please select the next remaining unfinished task from the task list and continue implementing the stats functionality until completion. Review the current progress and identify what still needs to be done continuing our work. All the while being sure to update the tasks.md so we can track our progress."
   }
 }

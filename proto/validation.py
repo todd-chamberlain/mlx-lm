@@ -13,10 +13,8 @@ except ImportError:
     # Fallback for when proto files haven't been generated yet
     inference_pb2 = None
 
-
-class ValidationError(Exception):
-    """Raised when message validation fails."""
-    pass
+# Import ValidationError from errors module
+from .errors import ValidationError
 
 
 class MessageValidator:

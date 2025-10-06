@@ -5,11 +5,11 @@ Base configuration classes for MLX Distributed Inference Server.
 import os
 from pathlib import Path
 from typing import List, Optional, Dict, Any
-from pydantic import BaseSettings, Field, validator
-from pydantic_settings import BaseSettings as PydanticBaseSettings
+from pydantic import Field, validator
+from pydantic_settings import BaseSettings
 
 
-class BaseConfig(PydanticBaseSettings):
+class BaseConfig(BaseSettings):
     """Base configuration class with common settings."""
     
     # Environment

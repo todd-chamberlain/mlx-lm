@@ -11,7 +11,7 @@ import os
 
 from .service import CoordinatorServer
 from .metrics_server import MetricsServer
-from config.base import load_config
+from config.base import load_config_from_file, get_config_path, BaseConfig
 
 
 # Configure logging
