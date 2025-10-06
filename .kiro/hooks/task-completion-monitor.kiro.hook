@@ -6,11 +6,16 @@
   "when": {
     "type": "fileEdited",
     "patterns": [
-      ".hook"
+      "api/__init__.py",
+      "coordinator/__init__.py",
+      "worker/__init__.py",
+      "proto/*.py",
+      "tests/test_*.py",
+      "tasks.md"
     ]
   },
   "then": {
     "type": "askAgent",
-    "prompt": "A task implementation has been completed. Please analyze the recent changes to determine if this represents a fully completed task implementation and provide a summary of what was accomplished. Write A comprehensive commit message & push the changes to the github repo."
+    "prompt": "A task implementation has been completed. Please analyze the recent changes to determine if this represents a fully completed task implementation and provide a summary of what was accomplished. Write A comprehensive commit message & push the changes to the github repo & & then make an update to the git.next.hook file to tell the next step to begin."
   }
 }

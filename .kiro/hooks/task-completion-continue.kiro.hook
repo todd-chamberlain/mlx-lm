@@ -12,6 +12,6 @@
   },
   "then": {
     "type": "askAgent",
-    "prompt": "The Task Implementation Completion hook has finished. Please select the next remaining unfinished task from the task list and continue implementing the stats functionality until completion. Review the current progress and identify what still needs to be done & then make an update to the git.next.hook file to tell the next step to begin."
+    "prompt": "The Task Implementation Completion hook has finished. Please select the next remaining unfinished task from the task list and continue implementing the stats functionality until completion. Review the current progress and identify what still needs to be done continuing our work."
   }
 }
