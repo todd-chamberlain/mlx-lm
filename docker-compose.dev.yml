@@ -1,0 +1,75 @@
+version: '3.8'
+
+# Development overrides for MLX Distributed Inference
+services:
+  redis:
+    ports:
+      - "6379:6379"  # Expose Redis port for development
+    volumes:
+      - ./config/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+
+  coordinator:
+    environment:
+      - LOG_LEVEL=DEBUG
+      - ENABLE_METRICS_AUTH=false
+    volumes:
+      - ./coordinator:/app/coordinator:ro  # Mount source for hot reload
+      - ./proto:/app/proto:ro
+      - ./config:/app/config:ro
+    ports:
+      - "50051:50051"  # Expose gRPC port
+      - "9091:9090"    # Expose metrics port
+
+  api:
+    environment:
+      - LOG_LEVEL=debug
+      - WORKERS=1  # Single worker for easier debugging
+      - ENABLE_AUTH=false
+      - RELOAD=true
+    volumes:
+      - ./api:/app/api:ro  # Mount source for hot reload
+      - ./proto:/app/proto:ro
+    ports:
+      - "8000:8000"  # Expose API port directly
+
+  nginx:
+    volumes:
+      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+
+  monitoring:
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    ports:
+      - "9090:9090"  # Prometheus
+      - "3000:3000"  # Grafana
+    volumes:
+      - ./config/prometheus:/etc/prometheus:ro
+      - ./config/grafana:/etc/grafana:ro
+
+  jaeger:
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "14268:14268"  # Jaeger collector
+
+  # Development database for testing
+  postgres:
+    image: postgres:15-alpine
+    container_name: mlx-postgres-dev
+    environment:
+      - POSTGRES_DB=mlx_dev
+      - POSTGRES_USER=mlx_user
+      - POSTGRES_PASSWORD=mlx_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    networks:
+      - mlx-network
+
+volumes:
+  postgres_dev_data:
+    driver: local
