@@ -15,6 +15,6 @@
   },
   "then": {
     "type": "askAgent",
-    "prompt": "A task implementation has been completed. Please analyze the recent changes to determine if this represents a fully completed task implementation and provide a summary of what was accomplished."
+    "prompt": "A task implementation has been completed. Please analyze the recent changes to determine if this represents a fully completed task implementation and provide a summary of what was accomplished. Write A comprehensive commit message & push the changes to the github repo."
   }
 }

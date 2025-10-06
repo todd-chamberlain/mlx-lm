@@ -1,0 +1,33 @@
+# MLX Worker Configuration
+
+# Worker identification
+worker_id: "worker-mac-studio-01"
+
+# Network configuration
+port: 8080
+coordinator_host: "coordinator.local:50051"
+auto_discover_coordinator: true
+
+# Model configuration
+model_path: "/models/mistral-7b-instruct-v0.1"
+model_name: "mistral-7b"
+
+# Performance settings
+max_concurrent: 4
+heartbeat_interval: 10
+health_check_interval: 30.0
+
+# Logging
+log_level: "INFO"
+
+# Device settings
+device:
+  memory_limit_gb: 32
+  gpu_memory_fraction: 0.8
+
+# Advanced settings
+advanced:
+  model_cache_size: 2
+  request_timeout: 300
+  cleanup_interval: 60
+  metrics_history_size: 100

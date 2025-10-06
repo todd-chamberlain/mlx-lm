@@ -62,7 +62,7 @@
     - Test request routing and retry mechanisms
     - _Requirements: 3.1, 3.2, 5.2_
 
-- [-] 4. Create native MLX worker implementation
+- [x] 4. Create native MLX worker implementation
   - [x] 4.1 Build MLX model loading and management
     - Implement model loading with MLX integration and error handling
     - Create model caching and memory management utilities
@@ -91,7 +91,7 @@
     - Create network discovery and coordinator connection logic
     - _Requirements: 5.1, 5.2_
   
-  - [ ] 4.5 Add worker metrics and health reporting
+  - [x] 4.5 Add worker metrics and health reporting
     - Implement GetMetrics endpoint with performance data
     - Build HealthCheck endpoint with current status
     - Add Metal memory usage tracking and reporting
