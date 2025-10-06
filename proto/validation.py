@@ -65,7 +65,6 @@ class MessageValidator:
         if not request.model or not request.model.strip():
             errors.append("model is required and cannot be empty")
         elif not re.match(r'^[a-zA-Z0-9_-]+$', request.model):
-            errors.append("model name can only contain alphanumeric characters, hyphens, and underscores")$', request.model):
             errors.append("model name can only contain alphanumeric characters, hyphens, and underscores")
         
         return errors
@@ -87,7 +86,6 @@ class MessageValidator:
         if not registration.worker_id or not registration.worker_id.strip():
             errors.append("worker_id is required and cannot be empty")
         elif not re.match(r'^[a-zA-Z0-9_-]+$', registration.worker_id):
-            errors.append("worker_id can only contain alphanumeric characters, hyphens, and underscores")$', registration.worker_id):
             errors.append("worker_id can only contain alphanumeric characters, hyphens, and underscores")
         elif len(registration.worker_id) > 64:
             errors.append("worker_id cannot exceed 64 characters")
@@ -119,7 +117,6 @@ class MessageValidator:
                 if not model or not model.strip():
                     errors.append("supported model names cannot be empty")
                 elif not re.match(r'^[a-zA-Z0-9_-]+$', model):
-                    errors.append(f"invalid model name '{model}': can only contain alphanumeric characters, hyphens, and underscores")$', model):
                     errors.append(f"invalid model name '{model}': can only contain alphanumeric characters, hyphens, and underscores")
         
         return errors

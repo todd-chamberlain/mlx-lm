@@ -1,0 +1,20 @@
+{
+  "enabled": true,
+  "name": "Task Implementation Completion",
+  "description": "Monitors for when a task implementation is fully completed by watching relevant implementation files",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "api/__init__.py",
+      "coordinator/__init__.py",
+      "worker/__init__.py",
+      "proto/*.py",
+      "tests/test_*.py"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "A task implementation has been completed. Please analyze the recent changes to determine if this represents a fully completed task implementation and provide a summary of what was accomplished."
+  }
+}

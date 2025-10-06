@@ -7,14 +7,14 @@
   - Set up shared requirements.txt files and Docker base configurations
   - _Requirements: 2.2, 2.5, 10.2_
 
-- [-] 2. Implement core gRPC protocol and communication layer
+- [x] 2. Implement core gRPC protocol and communication layer
   - [x] 2.1 Create gRPC service definitions and message types
     - Define InferenceRequest, InferenceResponse, WorkerRegistration, and other core messages
     - Implement CoordinatorService and InferenceService gRPC interfaces
     - Add proper error handling and status codes for gRPC communication
     - _Requirements: 2.3, 3.1, 3.2_
   
-  - [-] 2.2 Build gRPC client and server base classes
+  - [x] 2.2 Build gRPC client and server base classes
     - Create reusable gRPC server setup with proper connection handling
     - Implement gRPC client connection management with retry logic
     - Add message serialization/deserialization utilities
@@ -26,29 +26,29 @@
     - Test retry logic and timeout handling
     - _Requirements: 2.3, 9.1_
 
-- [ ] 3. Build coordinator service with worker management
-  - [ ] 3.1 Implement worker registration and discovery
+- [x] 3. Build coordinator service with worker management
+  - [x] 3.1 Implement worker registration and discovery
     - Create WorkerInfo data model with device capabilities tracking
     - Implement RegisterWorker gRPC endpoint with validation
     - Build worker pool management with thread-safe operations
     - Add worker deregistration and cleanup logic
     - _Requirements: 5.1, 5.2, 3.4_
   
-  - [ ] 3.2 Create intelligent worker selection algorithm
+  - [x] 3.2 Create intelligent worker selection algorithm
     - Implement worker scoring based on load, latency, and reliability
     - Build load balancing logic with configurable weights
     - Add worker health status tracking and filtering
     - Create fallback selection when preferred workers unavailable
     - _Requirements: 3.1, 3.2, 3.5_
   
-  - [ ] 3.3 Build health monitoring and heartbeat system
+  - [x] 3.3 Build health monitoring and heartbeat system
     - Implement Heartbeat gRPC endpoint with worker status updates
     - Create background health check loop with configurable intervals
     - Add automatic worker removal for unresponsive nodes
     - Build health status aggregation for cluster monitoring
     - _Requirements: 5.2, 5.3, 5.4_
   
-  - [ ] 3.4 Implement request routing and retry logic
+  - [x] 3.4 Implement request routing and retry logic
     - Create RouteInference endpoint with worker selection integration
     - Build automatic retry mechanism with different worker selection
     - Add circuit breaker pattern for failed workers
@@ -62,29 +62,29 @@
     - Test request routing and retry mechanisms
     - _Requirements: 3.1, 3.2, 5.2_
 
-- [ ] 4. Create native MLX worker implementation
-  - [ ] 4.1 Build MLX model loading and management
+- [-] 4. Create native MLX worker implementation
+  - [x] 4.1 Build MLX model loading and management
     - Implement model loading with MLX integration and error handling
     - Create model caching and memory management utilities
     - Add device detection and capability reporting
     - Build model validation and compatibility checking
     - _Requirements: 4.1, 4.3, 4.5_
   
-  - [ ] 4.2 Implement inference processing with native MLX
+  - [x] 4.2 Implement inference processing with native MLX
     - Create ProcessInference gRPC endpoint with MLX generate integration
     - Build token counting and performance metrics collection
     - Add generation parameter handling (temperature, top_p, max_tokens)
     - Implement proper error handling and resource cleanup
     - _Requirements: 4.1, 4.2, 1.3_
   
-  - [ ] 4.3 Build streaming inference capabilities
+  - [x] 4.3 Build streaming inference capabilities
     - Implement StreamInference endpoint with MLX stream_generate
     - Create token-by-token streaming with proper chunk formatting
     - Add streaming error handling and connection management
     - Build backpressure handling for slow clients
     - _Requirements: 1.2, 4.4_
   
-  - [ ] 4.4 Create worker registration and heartbeat client
+  - [x] 4.4 Create worker registration and heartbeat client
     - Implement automatic registration with coordinator on startup
     - Build periodic heartbeat sending with current status
     - Add graceful shutdown and deregistration
