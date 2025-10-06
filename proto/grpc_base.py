@@ -74,14 +74,14 @@ class GRPCServerBase:
         self.server: Optional[grpc.Server] = None
         self._shutdown_event = asyncio.Event()
         
-        # Server options
+        # Server options - more lenient keepalive settings
         self.options = [
-            ('grpc.keepalive_time_ms', 30000),
-            ('grpc.keepalive_timeout_ms', 5000),
-            ('grpc.keepalive_permit_without_calls', True),
-            ('grpc.http2.max_pings_without_data', 0),
-            ('grpc.http2.min_time_between_pings_ms', 10000),
-            ('grpc.http2.min_ping_interval_without_data_ms', 300000),
+            ('grpc.keepalive_time_ms', 60000),  # 60 seconds
+            ('grpc.keepalive_timeout_ms', 10000),  # 10 seconds
+            ('grpc.keepalive_permit_without_calls', True),  # Allow keepalive without calls
+            ('grpc.http2.max_pings_without_data', 2),  # Allow 2 pings without data
+            ('grpc.http2.min_time_between_pings_ms', 60000),  # 60 seconds between pings
+            ('grpc.http2.min_ping_interval_without_data_ms', 60000),  # 60 seconds for pings without data
             ('grpc.max_receive_message_length', max_receive_message_length),
             ('grpc.max_send_message_length', max_send_message_length),
         ]
@@ -192,9 +192,11 @@ class GRPCClientBase:
         
         if enable_keepalive:
             self.options.extend([
-                ('grpc.keepalive_time_ms', 30000),
-                ('grpc.keepalive_timeout_ms', 5000),
-                ('grpc.keepalive_permit_without_calls', True),
+                ('grpc.keepalive_time_ms', 60000),  # 60 seconds - less aggressive
+                ('grpc.keepalive_timeout_ms', 10000),  # 10 seconds timeout
+                ('grpc.keepalive_permit_without_calls', False),  # Don't ping without calls
+                ('grpc.http2.max_pings_without_data', 0),  # Unlimited pings with data
+                ('grpc.http2.min_time_between_pings_ms', 120000),  # 2 minutes between pings
             ])
     
     async def connect(self) -> grpc.Channel:

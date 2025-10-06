@@ -92,8 +92,8 @@ def get_coordinator_client() -> CoordinatorClient:
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 @limiter.limit("100/minute")  # 100 requests per minute per client
 async def create_chat_completion(
-    request: ChatCompletionRequest,
-    http_request: Request,
+    chat_request: ChatCompletionRequest,
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     coordinator: CoordinatorClient = Depends(get_coordinator_client)
 ):
@@ -105,27 +105,27 @@ async def create_chat_completion(
     
     # Verify authentication if enabled
     if os.getenv("ENABLE_AUTH", "false").lower() == "true":
-        verify_api_key(credentials, http_request)
+        verify_api_key(credentials, request)
     
     # Handle streaming requests
-    if request.stream:
-        request_id = request.id or str(uuid.uuid4())
+    if chat_request.stream:
+        request_id = chat_request.id or str(uuid.uuid4())
         return await streaming_manager.create_streaming_response(
-            http_request,
-            stream_chat_completion(request, coordinator),
+            request,
+            stream_chat_completion(chat_request, coordinator),
             request_id
         )
     
     # Handle non-streaming requests
     try:
-        response = await coordinator.route_inference(request)
+        response = await coordinator.route_inference(chat_request)
         
         # Log successful request
         duration_ms = (time.time() - start_time) * 1000
         audit.log_request(
-            http_request,
+            request,
             credentials,
-            request_data=request.model_dump(),
+            request_data=chat_request.model_dump(),
             response_status=200,
             response_data=response.model_dump(),
             duration_ms=duration_ms
@@ -136,9 +136,9 @@ async def create_chat_completion(
         # Log failed request
         duration_ms = (time.time() - start_time) * 1000
         audit.log_request(
-            http_request,
+            request,
             credentials,
-            request_data=request.model_dump(),
+            request_data=chat_request.model_dump(),
             response_status=500,
             duration_ms=duration_ms,
             error=str(e)
@@ -264,14 +264,14 @@ async def get_metrics():
 @app.get("/models", response_model=ModelsResponse)
 @limiter.limit("60/minute")  # 60 requests per minute per client
 async def list_models(
-    http_request: Request,
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     coordinator: CoordinatorClient = Depends(get_coordinator_client)
 ):
     """List available models."""
     # Verify authentication if enabled
     if os.getenv("ENABLE_AUTH", "false").lower() == "true":
-        verify_api_key(credentials, http_request)
+        verify_api_key(credentials, request)
     
     try:
         models = await coordinator.get_available_models()

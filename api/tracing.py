@@ -8,13 +8,14 @@ from typing import Optional
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.jaeger.thrift import JaegerExporter
+# from opentelemetry.exporter.jaeger.thrift import JaegerExporter  # Disabled for now
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-from opentelemetry.instrumentation.grpc import GrpcInstrumentorClient
-from opentelemetry.propagate import set_global_textmap
-from opentelemetry.propagators.jaeger import JaegerPropagator
+# Temporarily disabled
+# from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+# from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+# from opentelemetry.instrumentation.grpc import GrpcInstrumentorClient
+# from opentelemetry.propagate import set_global_textmap
+# from opentelemetry.propagators.jaeger import JaegerPropagator
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,10 @@ def setup_tracing(app, config: Optional[TracingConfig] = None) -> Optional[trace
     """Set up distributed tracing for the FastAPI application."""
     if config is None:
         config = TracingConfig()
+    
+    # Temporarily disable tracing
+    logger.info("Distributed tracing is disabled")
+    return None
     
     if not config.enabled:
         logger.info("Distributed tracing is disabled")

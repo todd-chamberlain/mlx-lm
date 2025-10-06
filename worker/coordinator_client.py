@@ -20,7 +20,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from proto.inference_pb2_grpc import CoordinatorServiceStub
 from proto import inference_pb2 as pb
-from proto.grpc_base import GrpcClient
+from proto.grpc_base import GRPCClientBase as GrpcClient
 
 from .model_manager import ModelManager
 from .inference_engine import InferenceEngine

@@ -80,9 +80,12 @@ class CoordinatorApp:
             )
             
             # Start metrics server if enabled
-            if metrics_config['enabled']:
-                self.metrics_server = MetricsServer(port=metrics_config['port'])
-                await self.metrics_server.start()
+            if metrics_config.get('enabled', False):  # Disabled by default for now
+                try:
+                    self.metrics_server = MetricsServer(port=metrics_config['port'])
+                    await self.metrics_server.start()
+                except Exception as e:
+                    logger.warning(f"Failed to start metrics server: {e}. Continuing without metrics.")
             
             # Set up signal handlers
             self._setup_signal_handlers()

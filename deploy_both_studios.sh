@@ -18,7 +18,7 @@ NC='\033[0m'
 STUDIO2_HOST="mac-studio-2"
 PROJECT_DIR="$(pwd)"
 MODEL_NAME="Llama-3.2-3B-Instruct-4bit"
-MODEL_PATH="/Users/Shared/models/${MODEL_NAME}"
+MODEL_PATH="~/models/${MODEL_NAME}"  # Use ~ to resolve correctly on each machine
 
 echo -e "${CYAN}${BOLD}"
 echo "╔════════════════════════════════════════════════════════════╗"
@@ -49,14 +49,16 @@ echo
 
 # Check if model exists locally
 echo -e "${YELLOW}[3/8]${NC} Checking for model on Mac Studio 1..."
-if [ -d "$MODEL_PATH" ]; then
+MODEL_PATH_EXPANDED="${MODEL_PATH/#\~/$HOME}"
+if [ -d "$MODEL_PATH_EXPANDED" ] && [ -f "$MODEL_PATH_EXPANDED/model.safetensors" ]; then
     echo -e "${GREEN}✓${NC} Model found: ${MODEL_PATH}"
 else
     echo -e "${YELLOW}⚠${NC} Model not found locally"
     echo "  Downloading ${MODEL_NAME}..."
-    mkdir -p /Users/Shared/models
-    cd /Users/Shared/models
-    huggingface-cli download mlx-community/${MODEL_NAME} --local-dir ${MODEL_NAME}
+    mkdir -p ~/models
+    cd ~/models
+    export HF_HOME=~/.huggingface && export HF_HUB_CACHE=~/.huggingface/hub
+    hf download mlx-community/${MODEL_NAME} --local-dir ${MODEL_NAME}
     cd "$PROJECT_DIR"
     echo -e "${GREEN}✓${NC} Model downloaded"
 fi
@@ -72,13 +74,13 @@ echo
 
 # Check/sync model to Studio 2
 echo -e "${YELLOW}[5/8]${NC} Checking model on Mac Studio 2..."
-if ssh ${STUDIO2_HOST} "[ -d '${MODEL_PATH}' ]"; then
+if ssh ${STUDIO2_HOST} "[ -d '${MODEL_PATH}' ]" && ssh ${STUDIO2_HOST} "[ -f '${MODEL_PATH}/model.safetensors' ]"; then
     echo -e "${GREEN}✓${NC} Model already exists on Mac Studio 2"
 else
     echo -e "${YELLOW}⚠${NC} Model not found on Mac Studio 2"
     echo "  Syncing model (this may take a while)..."
-    ssh ${STUDIO2_HOST} "mkdir -p /Users/Shared/models"
-    rsync -az --progress "${MODEL_PATH}/" ${STUDIO2_HOST}:${MODEL_PATH}/
+    ssh ${STUDIO2_HOST} "mkdir -p ~/models"
+    rsync -az --progress "${MODEL_PATH_EXPANDED}/" ${STUDIO2_HOST}:~/models/${MODEL_NAME}/
     echo -e "${GREEN}✓${NC} Model synced to Mac Studio 2"
 fi
 echo
