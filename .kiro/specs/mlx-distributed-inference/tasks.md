@@ -113,7 +113,7 @@
     - Create request latency and throughput measurement
     - _Requirements: 6.4, 5.5_
 
-  - [ ]\* 4.6 Write MLX worker unit tests
+  - [x] 4.6 Write MLX worker unit tests
     - Test model loading and validation
     - Test inference processing with mock MLX calls
     - Test streaming functionality and error handling
@@ -154,7 +154,7 @@
     - Create security headers and CORS configuration
     - _Requirements: 8.1, 8.2, 8.3_
 
-  - [ ]\* 5.5 Write API server unit tests
+  - [x] 5.5 Write API server unit tests
     - Test OpenAI endpoint compatibility and validation
     - Test authentication and authorization flows
     - Test streaming response handling
@@ -187,7 +187,7 @@
     - Create trace sampling and retention policies
     - _Requirements: 6.3_
 
-  - [ ]\* 6.4 Write monitoring integration tests
+  - [x] 6.4 Write monitoring integration tests
     - Test metrics collection and export
     - Test dashboard functionality and data accuracy
     - Test alerting rules and notification delivery
@@ -196,7 +196,7 @@
 
 - [ ] 7. Create Docker containerization and orchestration
 
-  - [ ] 7.1 Build Docker images for containerized services
+  - [x] 7.1 Build Docker images for containerized services
 
     - Create Dockerfiles for API server, coordinator, and monitoring services
     - Implement multi-stage builds for optimized image sizes

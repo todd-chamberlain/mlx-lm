@@ -60,21 +60,45 @@ clean:
 # Docker operations
 docker-build: proto
 	@echo "Building Docker images..."
-	docker-compose build --no-cache
+	./docker/build.sh
+
+docker-build-prod: proto
+	@echo "Building production Docker images..."
+	./docker/build.sh --version $(shell git describe --tags --always) --push
 
 docker-up: proto
 	@echo "Starting services..."
 	docker-compose up -d
 	@echo "Services started! Check status with 'make logs'"
 
+docker-up-prod: proto
+	@echo "Starting production services..."
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+	@echo "Production services started!"
+
 docker-down:
 	@echo "Stopping services..."
 	docker-compose down
 	@echo "Services stopped!"
 
+docker-down-prod:
+	@echo "Stopping production services..."
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml down
+	@echo "Production services stopped!"
+
+docker-clean:
+	@echo "Cleaning up Docker resources..."
+	docker-compose down -v --remove-orphans
+	docker system prune -f
+	@echo "Docker cleanup completed!"
+
 logs:
 	@echo "Showing logs from all services..."
 	docker-compose logs -f
+
+logs-prod:
+	@echo "Showing production logs..."
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml logs -f
 
 # Development helpers
 dev-api:

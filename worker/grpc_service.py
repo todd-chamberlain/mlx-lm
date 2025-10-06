@@ -19,8 +19,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from proto.inference_pb2_grpc import InferenceServiceServicer
 from proto import inference_pb2 as pb
-from proto.grpc_base import GrpcServer
-from proto.errors import GrpcError, ErrorCode
+from proto.grpc_base import GRPCServerBase
+from proto.errors import MLXError, MLXErrorCode
 
 from .model_manager import ModelManager
 from .inference_engine import InferenceEngine, InferenceRequest as EngineRequest

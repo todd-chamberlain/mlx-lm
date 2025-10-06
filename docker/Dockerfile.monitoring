@@ -1,0 +1,86 @@
+# Multi-stage Dockerfile for Monitoring Services (Prometheus, Grafana, Jaeger)
+# This is a combined monitoring stack for development/testing
+FROM alpine:3.18 as base
+
+# Install common dependencies
+RUN apk add --no-cache \
+    ca-certificates \
+    curl \
+    wget \
+    tar \
+    gzip
+
+# Stage 1: Prometheus
+FROM base as prometheus-builder
+
+# Prometheus version
+ARG PROMETHEUS_VERSION=2.47.0
+
+# Download and extract Prometheus
+WORKDIR /tmp
+RUN wget https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz && \
+    tar -xzf prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz && \
+    mv prometheus-${PROMETHEUS_VERSION}.linux-amd64 /prometheus
+
+# Stage 2: Grafana
+FROM base as grafana-builder
+
+# Grafana version
+ARG GRAFANA_VERSION=10.1.0
+
+# Download and extract Grafana
+WORKDIR /tmp
+RUN wget https://dl.grafana.com/oss/release/grafana-${GRAFANA_VERSION}.linux-amd64.tar.gz && \
+    tar -xzf grafana-${GRAFANA_VERSION}.linux-amd64.tar.gz && \
+    mv grafana-${GRAFANA_VERSION} /grafana
+
+# Stage 3: Final monitoring image
+FROM alpine:3.18 as monitoring
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    ca-certificates \
+    curl \
+    bash \
+    supervisor \
+    && addgroup -g 1001 monitoring \
+    && adduser -D -u 1001 -G monitoring monitoring
+
+# Copy Prometheus
+COPY --from=prometheus-builder /prometheus /opt/prometheus
+RUN chown -R monitoring:monitoring /opt/prometheus
+
+# Copy Grafana
+COPY --from=grafana-builder /grafana /opt/grafana
+RUN chown -R monitoring:monitoring /opt/grafana
+
+# Create directories
+RUN mkdir -p /var/lib/prometheus /var/lib/grafana /var/log/supervisor /etc/supervisor/conf.d && \
+    chown -R monitoring:monitoring /var/lib/prometheus /var/lib/grafana
+
+# Copy configuration files
+COPY --chown=monitoring:monitoring config/prometheus/ /etc/prometheus/
+COPY --chown=monitoring:monitoring config/grafana/ /etc/grafana/
+COPY --chown=monitoring:monitoring docker/monitoring/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# Copy startup script
+COPY --chown=monitoring:monitoring docker/scripts/start-monitoring.sh /start-monitoring.sh
+RUN chmod +x /start-monitoring.sh
+
+# Switch to non-root user
+USER monitoring
+
+# Expose ports
+EXPOSE 9090 3000
+
+# Add labels
+LABEL maintainer="MLX Distributed Inference Team"
+LABEL version="1.0.0"
+LABEL description="MLX Distributed Inference Monitoring Stack"
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:9090/-/healthy && curl -f http://localhost:3000/api/health || exit 1
+
+# Run supervisor to manage multiple services
+CMD ["/start-monitoring.sh"]

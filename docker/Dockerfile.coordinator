@@ -1,0 +1,94 @@
+# Multi-stage Dockerfile for MLX Coordinator Service
+# Stage 1: Build dependencies
+FROM python:3.11-slim as builder
+
+# Set build environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PIP_NO_CACHE_DIR=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    gcc \
+    g++ \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy requirements files
+WORKDIR /build
+COPY requirements.txt .
+COPY coordinator/requirements.txt ./coordinator-requirements.txt
+
+# Install Python dependencies
+RUN pip install --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r coordinator-requirements.txt
+
+# Stage 2: Runtime image
+FROM python:3.11-slim as runtime
+
+# Set runtime environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Copy virtual environment from builder stage
+COPY --from=builder /opt/venv /opt/venv
+
+# Create application directory
+WORKDIR /app
+
+# Create non-root user
+RUN groupadd -g 1001 appuser && \
+    useradd -r -u 1001 -g appuser -d /app -s /bin/bash appuser && \
+    chown -R appuser:appuser /app
+
+# Copy application code
+COPY --chown=appuser:appuser coordinator/ ./coordinator/
+COPY --chown=appuser:appuser proto/ ./proto/
+COPY --chown=appuser:appuser config/ ./config/
+
+# Copy startup script
+COPY --chown=appuser:appuser docker/scripts/start-coordinator.sh ./start-coordinator.sh
+RUN chmod +x ./start-coordinator.sh
+
+# Switch to non-root user
+USER appuser
+
+# Expose gRPC port
+EXPOSE 50051
+
+# Expose metrics port
+EXPOSE 9090
+
+# Add labels for metadata
+LABEL maintainer="MLX Distributed Inference Team"
+LABEL version="1.0.0"
+LABEL description="MLX Distributed Inference Coordinator Service"
+LABEL org.opencontainers.image.source="https://github.com/mlx-distributed-inference"
+
+# Health check using gRPC health probe
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD python -c "import grpc; import sys; \
+    try: \
+        channel = grpc.insecure_channel('localhost:50051'); \
+        grpc.channel_ready_future(channel).result(timeout=5); \
+        channel.close(); \
+    except Exception as e: \
+        print(f'Health check failed: {e}'); \
+        sys.exit(1)"
+
+# Run the application
+CMD ["./start-coordinator.sh"]
