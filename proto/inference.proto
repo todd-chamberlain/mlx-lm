@@ -1,0 +1,131 @@
+syntax = "proto3";
+
+package mlx_inference;
+
+// Coordinator Service - manages workers and routes requests
+service CoordinatorService {
+    rpc RegisterWorker(WorkerRegistration) returns (RegistrationResponse);
+    rpc RouteInference(InferenceRequest) returns (InferenceResponse);
+    rpc StreamInference(InferenceRequest) returns (stream StreamChunk);
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// Inference Service - runs on MLX workers
+service InferenceService {
+    rpc ProcessInference(InferenceRequest) returns (InferenceResponse);
+    rpc StreamInference(InferenceRequest) returns (stream StreamChunk);
+    rpc HealthCheck(Empty) returns (HealthStatus);
+    rpc GetMetrics(Empty) returns (WorkerMetrics);
+}
+
+// Core request/response messages
+message InferenceRequest {
+    string request_id = 1;
+    string prompt = 2;
+    int32 max_tokens = 3;
+    float temperature = 4;
+    float top_p = 5;
+    int32 seed = 6;
+    string model = 7;
+    bool use_cache = 8;
+}
+
+message InferenceResponse {
+    string request_id = 1;
+    string text = 2;
+    repeated int32 tokens = 3;
+    int32 prompt_tokens = 4;
+    int32 completion_tokens = 5;
+    float tokens_per_second = 6;
+    string worker_id = 7;
+    float latency_ms = 8;
+}
+
+message StreamChunk {
+    string request_id = 1;
+    string text = 2;
+    int32 token = 3;
+    bool is_final = 4;
+    string worker_id = 5;
+}
+
+// Worker registration and management
+message WorkerRegistration {
+    string worker_id = 1;
+    string address = 2;
+    DeviceInfo device_info = 3;
+    int32 max_concurrent = 4;
+    repeated string supported_models = 5;
+}
+
+message RegistrationResponse {
+    bool success = 1;
+    string message = 2;
+    string coordinator_id = 3;
+}
+
+message DeviceInfo {
+    string model = 1;
+    int32 memory_gb = 2;
+    int32 gpu_cores = 3;
+    string os_version = 4;
+    string mlx_version = 5;
+}
+
+// Health and monitoring
+message HeartbeatRequest {
+    string worker_id = 1;
+    WorkerStatus status = 2;
+    WorkerMetrics metrics = 3;
+}
+
+message HeartbeatResponse {
+    bool acknowledged = 1;
+    string message = 2;
+    int32 heartbeat_interval = 3;
+}
+
+message WorkerStatus {
+    string status = 1;  // healthy, unhealthy, draining
+    int32 current_load = 2;
+    float memory_usage_percent = 3;
+    int64 uptime_seconds = 4;
+}
+
+message WorkerMetrics {
+    float avg_latency_ms = 1;
+    float tokens_per_second = 2;
+    int32 total_requests = 3;
+    int32 failed_requests = 4;
+    int32 active_requests = 5;
+    float memory_usage_gb = 6;
+}
+
+message HealthCheckRequest {
+    bool include_workers = 1;
+}
+
+message HealthCheckResponse {
+    string status = 1;  // healthy, degraded, unhealthy
+    int32 total_workers = 2;
+    int32 healthy_workers = 3;
+    int32 active_requests = 4;
+    repeated WorkerHealthInfo worker_health = 5;
+}
+
+message WorkerHealthInfo {
+    string worker_id = 1;
+    string status = 2;
+    float last_heartbeat_seconds = 3;
+    int32 current_load = 4;
+}
+
+message HealthStatus {
+    string status = 1;
+    string message = 2;
+    WorkerMetrics metrics = 3;
+}
+
+// Utility messages
+message Empty {}

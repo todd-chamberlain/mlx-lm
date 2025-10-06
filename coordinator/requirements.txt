@@ -1,0 +1,15 @@
+# Coordinator Service specific dependencies
+
+# Include shared dependencies
+-r ../requirements.txt
+
+# Redis for caching and state management
+redis>=5.0.0
+aioredis>=2.0.1
+
+# Background task processing
+celery>=5.3.0
+
+# Service discovery (optional)
+python-consul>=1.1.0
+zeroconf>=0.131.0

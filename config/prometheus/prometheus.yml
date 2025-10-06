@@ -1,0 +1,46 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "rules/*.yml"
+
+scrape_configs:
+  # API Server metrics
+  - job_name: 'api-server'
+    static_configs:
+      - targets: ['api:9090']
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  # Coordinator metrics
+  - job_name: 'coordinator'
+    static_configs:
+      - targets: ['coordinator:9091']
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  # MLX Workers (will be dynamically discovered)
+  - job_name: 'mlx-workers'
+    static_configs:
+      - targets: []  # Workers will register themselves
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # System metrics
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Redis metrics (if redis_exporter is added)
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - alertmanager:9093
