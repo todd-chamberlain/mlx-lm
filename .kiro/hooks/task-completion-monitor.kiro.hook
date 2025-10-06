@@ -6,12 +6,7 @@
   "when": {
     "type": "fileEdited",
     "patterns": [
-      "api/__init__.py",
-      "coordinator/__init__.py",
-      "worker/__init__.py",
-      "proto/*.py",
-      "tests/test_*.py",
-      "tasks.md"
+      ".git"
     ]
   },
   "then": {
