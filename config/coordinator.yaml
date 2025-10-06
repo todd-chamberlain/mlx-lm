@@ -1,0 +1,67 @@
+# MLX Distributed Inference Coordinator Configuration
+
+# Server settings
+server:
+  port: 50051
+  max_workers: 10
+  enable_reflection: false
+  max_message_size: 4194304  # 4MB
+
+# Worker pool management
+worker_pool:
+  heartbeat_timeout: 30.0
+  cleanup_interval: 60.0
+  max_workers: 100
+  worker_timeout: 300
+  registration_timeout: 30
+
+# Load balancing
+load_balancing:
+  algorithm: "weighted_round_robin"  # round_robin, weighted_round_robin, least_connections
+  weights:
+    latency: 0.4
+    load: 0.3
+    reliability: 0.3
+  health_check_interval: 10
+
+# Circuit breaker
+circuit_breaker:
+  failure_threshold: 5
+  recovery_timeout: 60.0
+  half_open_max_calls: 3
+
+# Request routing
+routing:
+  max_retries: 3
+  retry_delay: 1.0
+  retry_backoff: 2.0
+  timeout: 300
+  queue_size: 1000
+
+# Health monitoring
+health:
+  check_interval: 30
+  unhealthy_threshold: 3
+  recovery_threshold: 2
+  metrics_retention: 300
+
+# Logging
+logging:
+  level: "INFO"
+  format: "json"
+  file: "/var/log/coordinator.log"
+  max_size_mb: 100
+  backup_count: 5
+
+# Monitoring
+monitoring:
+  metrics_enabled: true
+  metrics_port: 9091
+  tracing_enabled: true
+  jaeger_endpoint: "http://jaeger:14268/api/traces"
+
+# Service discovery
+discovery:
+  enabled: true
+  announce_interval: 30
+  ttl: 90
