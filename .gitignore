@@ -112,3 +112,6 @@ models/
 config/local/
 config/*.local.yaml
 config/*.local.yml
+
+# Hook Execution file
+*.hook
