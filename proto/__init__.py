@@ -51,26 +51,27 @@ from .validation import (
     ensure_valid_message,
 )
 
-from .utils import (
-    generate_request_id,
-    get_current_timestamp,
-    format_grpc_address,
-    parse_grpc_address,
-    create_inference_request,
-    create_worker_registration,
-    create_heartbeat_request,
-    create_stream_chunk,
-    create_inference_response,
-    create_health_check_request,
-    create_empty_message,
-    MessageBuilder,
-    quick_inference_request,
-    quick_worker_registration,
-    log_grpc_call,
-    grpc_call_context,
-    is_retryable_error,
-    get_error_details,
-)
+# Temporarily commented out to avoid circular import
+# from .utils import (
+#     generate_request_id,
+#     get_current_timestamp,
+#     format_grpc_address,
+#     parse_grpc_address,
+#     create_inference_request,
+#     create_worker_registration,
+#     create_heartbeat_request,
+#     create_stream_chunk,
+#     create_inference_response,
+#     create_health_check_request,
+#     create_empty_message,
+#     MessageBuilder,
+#     quick_inference_request,
+#     quick_worker_registration,
+#     log_grpc_call,
+#     grpc_call_context,
+#     is_retryable_error,
+#     get_error_details,
+# )
 
 __all__ = [
     # Generated protobuf modules

@@ -154,9 +154,8 @@ class CoordinatorClient:
             
             logger.info(f"Registering worker {self.worker_id} with coordinator...")
             
-            # Send registration request (sync stub, run in executor)
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, self.stub.RegisterWorker, registration)
+            # Send registration request
+            response = await self.stub.RegisterWorker(registration)
             
             if response.success:
                 self.registered = True

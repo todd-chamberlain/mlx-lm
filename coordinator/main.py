@@ -145,11 +145,14 @@ class CoordinatorApp:
             if start_task in done:
                 try:
                     await start_task
+                    # Start completed successfully, now wait for shutdown
+                    logger.info("Coordinator started successfully, waiting for shutdown signal")
+                    await self._shutdown_event.wait()
                 except Exception as e:
                     logger.error(f"Coordinator startup failed: {e}")
                     return
             
-            # If we get here, we received a shutdown signal
+            # Shutdown signal received
             await self.stop()
             
         except Exception as e:
