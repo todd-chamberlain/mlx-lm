@@ -17,7 +17,9 @@ from proto.inference_pb2 import (
     StreamChunk
 )
 from proto.inference_pb2_grpc import CoordinatorServiceServicer
-from proto.grpc_base import GRPCServerBase
+# For async support
+from grpc import aio as grpc_aio
+from proto.grpc_base import GRPCAsyncServerBase
 from proto.errors import MLXError, MLXErrorCode, handle_grpc_error
 from proto.validation import validate_message
 
@@ -40,7 +42,7 @@ class CoordinatorService(CoordinatorServiceServicer):
         self.request_router = RequestRouter(worker_pool)
         logger.info("CoordinatorService initialized")
     
-    def RegisterWorker(self, request, context):
+    async def RegisterWorker(self, request, context):
         """Register a new worker or update existing worker."""
         try:
             # Validate request
@@ -294,7 +296,7 @@ class CoordinatorService(CoordinatorServiceServicer):
             context.set_details(f"Internal server error: {str(e)}")
 
 
-class CoordinatorServer(GRPCServerBase):
+class CoordinatorServer(GRPCAsyncServerBase):
     """Coordinator gRPC server."""
     
     def __init__(
@@ -318,7 +320,7 @@ class CoordinatorServer(GRPCServerBase):
         
         logger.info(f"CoordinatorServer initialized on port {port}")
     
-    def add_servicers(self, server: grpc.Server) -> None:
+    async def add_servicers(self, server: grpc_aio.Server) -> None:
         """Add coordinator service to the server."""
         from proto.inference_pb2_grpc import add_CoordinatorServiceServicer_to_server
         add_CoordinatorServiceServicer_to_server(self.coordinator_service, server)

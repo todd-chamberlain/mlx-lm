@@ -54,6 +54,81 @@ class RetryConfig:
         return delay
 
 
+class GRPCAsyncServerBase:
+    """Base class for async gRPC servers."""
+    
+    def __init__(
+        self,
+        port: int,
+        max_workers: int = 10,
+        max_receive_message_length: int = 4 * 1024 * 1024,
+        max_send_message_length: int = 4 * 1024 * 1024,
+        enable_reflection: bool = False
+    ):
+        self.port = port
+        self.max_workers = max_workers
+        self.max_receive_message_length = max_receive_message_length
+        self.max_send_message_length = max_send_message_length
+        self.enable_reflection = enable_reflection
+        
+        self.server: Optional[grpc_aio.Server] = None
+        self._shutdown_event = asyncio.Event()
+        
+        # Server options
+        self.options = [
+            ('grpc.keepalive_time_ms', 60000),
+            ('grpc.keepalive_timeout_ms', 10000),
+            ('grpc.keepalive_permit_without_calls', True),
+            ('grpc.http2.max_pings_without_data', 2),
+            ('grpc.http2.min_time_between_pings_ms', 60000),
+            ('grpc.http2.min_ping_interval_without_data_ms', 60000),
+            ('grpc.max_receive_message_length', max_receive_message_length),
+            ('grpc.max_send_message_length', max_send_message_length),
+        ]
+    
+    async def create_server(self) -> grpc_aio.Server:
+        """Create and configure async gRPC server."""
+        server = grpc_aio.server(options=self.options)
+        
+        # Add servicers (to be implemented by subclasses)
+        await self.add_servicers(server)
+        
+        # Add insecure port
+        listen_addr = f'[::]:{self.port}'
+        server.add_insecure_port(listen_addr)
+        
+        return server
+    
+    async def add_servicers(self, server: grpc_aio.Server) -> None:
+        """Add servicers to server. Must be implemented by subclasses."""
+        raise NotImplementedError("Subclasses must implement add_servicers")
+    
+    async def start(self) -> None:
+        """Start the async gRPC server."""
+        if self.server:
+            logger.warning("Server already started")
+            return
+        
+        self.server = await self.create_server()
+        await self.server.start()
+        logger.info(f"Async gRPC server started on port {self.port}")
+    
+    async def stop(self, grace: float = 5.0) -> None:
+        """Stop the async gRPC server."""
+        if not self.server:
+            return
+        
+        logger.info("Stopping async gRPC server...")
+        await self.server.stop(grace)
+        self.server = None
+        logger.info("Async gRPC server stopped")
+    
+    async def wait_for_termination(self) -> None:
+        """Wait for server termination."""
+        if self.server:
+            await self.server.wait_for_termination()
+
+
 class GRPCServerBase:
     """Base class for gRPC servers with common functionality."""
     

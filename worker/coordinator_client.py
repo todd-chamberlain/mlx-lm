@@ -19,6 +19,8 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from proto.inference_pb2_grpc import CoordinatorServiceStub
+# Use async stub for async operations
+from proto import inference_pb2_grpc
 from proto import inference_pb2 as pb
 from proto.grpc_base import GRPCClientBase as GrpcClient
 
@@ -59,19 +61,21 @@ class CoordinatorClient:
     async def connect(self) -> bool:
         """Connect to the coordinator service"""
         try:
-            # Create gRPC channel with retry options
+            # Create gRPC channel with lenient keepalive options to avoid too_many_pings
             options = [
-                ('grpc.keepalive_time_ms', 30000),
-                ('grpc.keepalive_timeout_ms', 5000),
-                ('grpc.keepalive_permit_without_calls', True),
+                # Disable keepalive to avoid too_many_pings error
+                # ('grpc.keepalive_time_ms', 60000),  # Disabled
+                # ('grpc.keepalive_timeout_ms', 10000),  # Disabled
+                # ('grpc.keepalive_permit_without_calls', False),  # Disabled
                 ('grpc.http2.max_pings_without_data', 0),
-                ('grpc.http2.min_time_between_pings_ms', 10000),
+                ('grpc.http2.min_time_between_pings_ms', 120000),  # 2 minutes
                 ('grpc.max_receive_message_length', 4 * 1024 * 1024),
                 ('grpc.max_send_message_length', 4 * 1024 * 1024),
             ]
             
             self.channel = grpc_aio.insecure_channel(self.coordinator_host, options=options)
-            self.stub = CoordinatorServiceStub(self.channel)
+            # Use async stub for async operations
+            self.stub = inference_pb2_grpc.CoordinatorServiceStub(self.channel)
             
             # Test connection with a simple health check
             try:
@@ -150,8 +154,9 @@ class CoordinatorClient:
             
             logger.info(f"Registering worker {self.worker_id} with coordinator...")
             
-            # Send registration request
-            response = await self.stub.RegisterWorker(registration)
+            # Send registration request (sync stub, run in executor)
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(None, self.stub.RegisterWorker, registration)
             
             if response.success:
                 self.registered = True
