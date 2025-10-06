@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+package distributed;
+
+// Distributed layer-level inference protocol
+// Enables splitting large models across multiple nodes
+
+// Activation transfer between pipeline stages
+message ActivationTransfer {
+    string request_id = 1;
+    int32 layer_index = 2;
+    bytes tensor_data = 3;  // Serialized tensor
+    TensorMetadata metadata = 4;
+    CompressionType compression = 5;
+}
+
+// Tensor metadata for reconstruction
+message TensorMetadata {
+    repeated int32 shape = 1;
+    string dtype = 2;  // float32, float16, etc.
+    int64 size_bytes = 3;
+}
+
+// Compression types for activation transfer
+enum CompressionType {
+    NONE = 0;
+    ZSTD = 1;
+    LZ4 = 2;
+}
+
+// Layer assignment for a node
+message LayerAssignment {
+    string node_id = 1;
+    int32 start_layer = 2;
+    int32 end_layer = 3;  // Exclusive
+    string next_node_id = 4;  // Next node in pipeline
+    string next_node_address = 5;
+}
+
+// Pipeline configuration
+message PipelineConfig {
+    string pipeline_id = 1;
+    string model_name = 2;
+    int32 total_layers = 3;
+    repeated LayerAssignment assignments = 4;
+    PartitionStrategy strategy = 5;
+}
+
+// Partitioning strategies
+enum PartitionStrategy {
+    BALANCED = 0;  // Equal layers per node
+    MEMORY_AWARE = 1;  // Based on available memory
+    CUSTOM = 2;  // User-defined splits
+}
+
+// Distributed inference request
+message DistributedInferenceRequest {
+    string request_id = 1;
+    string pipeline_id = 2;
+    
+    // For first node: input tokens
+    repeated int32 input_tokens = 3;
+    
+    // For intermediate nodes: activation from previous
+    ActivationTransfer activation = 4;
+    
+    // Generation parameters
+    int32 max_tokens = 5;
+    float temperature = 6;
+    float top_p = 7;
+}
+
+// Distributed inference response
+message DistributedInferenceResponse {
+    string request_id = 1;
+    
+    // For intermediate nodes: activation for next node
+    ActivationTransfer activation = 2;
+    
+    // For final node: generated tokens
+    repeated int32 output_tokens = 3;
+    string generated_text = 4;
+    
+    // Metrics
+    PipelineMetrics metrics = 5;
+}
+
+// Pipeline execution metrics
+message PipelineMetrics {
+    int64 stage_latency_ms = 1;
+    int64 transfer_latency_ms = 2;
+    int64 compute_latency_ms = 3;
+    int64 activation_size_bytes = 4;
+    int32 layers_processed = 5;
+}
+
+// Pipeline health check
+message PipelineHealthRequest {
+    string pipeline_id = 1;
+}
+
+message PipelineHealthResponse {
+    string pipeline_id = 1;
+    PipelineStatus status = 2;
+    repeated NodeHealth nodes = 3;
+}
+
+enum PipelineStatus {
+    INITIALIZING = 0;
+    READY = 1;
+    RUNNING = 2;
+    DEGRADED = 3;
+    FAILED = 4;
+}
+
+message NodeHealth {
+    string node_id = 1;
+    bool is_healthy = 2;
+    int32 assigned_layers = 3;
+    int64 memory_used_bytes = 4;
+}
+
+// Distributed inference service
+service DistributedInferenceService {
+    // Execute inference on assigned layers
+    rpc ProcessLayers(DistributedInferenceRequest) returns (DistributedInferenceResponse);
+    
+    // Stream inference through pipeline
+    rpc StreamPipeline(stream DistributedInferenceRequest) returns (stream DistributedInferenceResponse);
+    
+    // Transfer activation to next node
+    rpc TransferActivation(ActivationTransfer) returns (TransferAck);
+    
+    // Check pipeline health
+    rpc CheckPipelineHealth(PipelineHealthRequest) returns (PipelineHealthResponse);
+}
+
+message TransferAck {
+    bool success = 1;
+    string message = 2;
+    int64 received_bytes = 3;
+}
