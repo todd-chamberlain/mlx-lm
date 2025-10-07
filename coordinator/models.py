@@ -9,6 +9,18 @@ from enum import Enum
 import threading
 
 
+@dataclass
+class InferenceResult:
+    """Result from inference processing."""
+    
+    request_id: str
+    generated_text: str
+    tokens_generated: int
+    processing_time_ms: float
+    success: bool
+    error: Optional[str] = None
+
+
 class WorkerStatus(Enum):
     """Worker status enumeration."""
     HEALTHY = "healthy"
