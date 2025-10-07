@@ -294,6 +294,69 @@ async def list_models(
         )
 
 
+@app.post("/admin/download_model")
+@limiter.limit("10/minute")
+async def download_model(
+    model_name: str,
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    coordinator: CoordinatorClient = Depends(get_coordinator_client)
+):
+    """Download a model in the background without interrupting service."""
+    # Verify authentication
+    if os.getenv("ENABLE_AUTH", "false").lower() == "true":
+        verify_api_key(credentials, request)
+    
+    try:
+        result = await coordinator.download_model(model_name)
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Download failed: {str(e)}"
+        )
+
+
+@app.get("/admin/download_status")
+async def download_status(
+    model_name: Optional[str] = None,
+    coordinator: CoordinatorClient = Depends(get_coordinator_client)
+):
+    """Check download status."""
+    try:
+        result = await coordinator.get_download_status(model_name)
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get status: {str(e)}"
+        )
+
+
+@app.post("/admin/load_model")
+@limiter.limit("5/minute")
+async def load_model(
+    model_name: str,
+    drain_timeout: int = 30,
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    coordinator: CoordinatorClient = Depends(get_coordinator_client)
+):
+    """Hot-swap to a different model with graceful draining."""
+    # Verify authentication
+    if os.getenv("ENABLE_AUTH", "false").lower() == "true":
+        verify_api_key(credentials, request)
+    
+    try:
+        result = await coordinator.load_model(model_name, drain_timeout)
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Model load failed: {str(e)}"
+        )
+
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Handle HTTP exceptions with OpenAI-compatible error format."""

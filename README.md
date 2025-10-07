@@ -1,175 +1,66 @@
-# MLX Distributed Inference Server
+# MLX Distributed Inference
 
-## 🎉 Project Status: COMPLETE & PRODUCTION READY
-
-**Completion Date:** October 6, 2025  
-**Status:** ✅ All implementation tasks complete  
-**Test Coverage:** 200+ tests, all passing  
-**Documentation:** Comprehensive, production-ready
-
-A production-ready hybrid MLX distributed inference server that combines containerized orchestration services with native MLX workers running directly on Apple Silicon hardware.
-
-## Architecture
-
-The system uses a hybrid architecture:
-- **Containerized Services**: API server, coordinator, and monitoring stack run in Docker containers
-- **Native Workers**: MLX inference workers run natively on macOS hosts for maximum GPU performance
-- **OpenAI Compatibility**: Provides OpenAI-compatible API endpoints for seamless integration
-
-## Project Structure
-
-```
-mlx-distributed-inference/
-├── api/                    # FastAPI server (containerized)
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── __init__.py
-├── coordinator/            # Coordinator service (containerized)
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   └── __init__.py
-├── worker/                 # MLX workers (native)
-│   ├── requirements.txt
-│   └── __init__.py
-├── proto/                  # Protocol buffer definitions
-│   ├── inference.proto
-│   ├── validation.py
-│   └── __init__.py
-├── config/                 # Configuration files
-│   ├── base.py
-│   ├── nginx/
-│   ├── redis/
-│   └── prometheus/
-├── scripts/                # Utility scripts
-│   └── generate_proto.py
-├── docker-compose.yml      # Container orchestration
-├── requirements.txt        # Shared dependencies
-└── Makefile               # Development commands
-```
+Production-ready distributed layer inference for Apple Silicon.
 
 ## Quick Start
 
-### Prerequisites
+```bash
+# Deploy
+./deploy_native_only.sh
 
-- Python 3.11+
-- Docker and Docker Compose
-- Apple Silicon Mac (for MLX workers)
+# Test
+curl http://localhost:8000/health
 
-### Setup
+# Inference
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"messages": [{"role": "user", "content": "Hello"}], "max_tokens": 50}'
+```
 
-1. **Clone and setup the project:**
-   ```bash
-   git clone <repository-url>
-   cd mlx-distributed-inference
-   make setup
-   ```
+## Features
 
-2. **Generate protocol buffer stubs:**
-   ```bash
-   make proto
-   ```
+- ✅ **Distributed Layers** - Split models across nodes
+- ✅ **Hot Model Swapping** - Zero downtime model changes
+- ✅ **Background Downloads** - Pre-cache models
+- ✅ **OpenAI-Compatible** - Drop-in API replacement
+- ✅ **Universal Models** - Works with any MLX model
 
-3. **Start containerized services:**
-   ```bash
-   make docker-up
-   ```
+## Documentation
 
-4. **Configure and start MLX workers** (on each Mac):
-   ```bash
-   # Install MLX dependencies
-   pip install -r worker/requirements.txt
-   
-   # Configure worker (edit config/worker.yaml)
-   # Start worker
-   make dev-worker
-   ```
+📖 **[Complete Guide](DISTRIBUTED_INFERENCE_GUIDE.md)** - Everything you need to know
 
-### Development
+## Architecture
 
-- **Start API server in development mode:**
-  ```bash
-  make dev-api
-  ```
+```
+Client → API (8000) → Coordinator (50051) → Workers (50052)
+                                              ├─ Node 1: Layers 0-N/2
+                                              └─ Node 2: Layers N/2-N
+```
 
-- **Start coordinator in development mode:**
-  ```bash
-  make dev-coordinator
-  ```
+## Admin API
 
-- **View logs:**
-  ```bash
-  make logs
-  ```
+```bash
+# Download model (background)
+curl -X POST "http://localhost:8000/admin/download_model?model_name=MODEL"
 
-- **Run tests:**
-  ```bash
-  make test
-  ```
+# Check download
+curl http://localhost:8000/admin/download_status
+
+# Hot-swap model
+curl -X POST "http://localhost:8000/admin/load_model?model_name=MODEL"
+```
 
 ## Configuration
 
-### Environment Variables
-
-Key environment variables for configuration:
-
-- `ENABLE_AUTH`: Enable API key authentication
-- `API_KEYS`: Comma-separated list of valid API keys
-- `COORDINATOR_HOST`: Coordinator service address
-- `REDIS_URL`: Redis connection URL
-- `ENABLE_METRICS`: Enable Prometheus metrics
-- `JAEGER_ENDPOINT`: Jaeger tracing endpoint
-
-### Configuration Files
-
-- `config/nginx/nginx.conf`: Load balancer configuration
-- `config/redis/redis.conf`: Redis cache configuration
-- `config/prometheus/prometheus.yml`: Metrics collection configuration
-
-## API Endpoints
-
-The server provides OpenAI-compatible endpoints:
-
-- `POST /v1/chat/completions`: Chat completion requests
-- `GET /health`: System health status
-- `GET /metrics`: Prometheus metrics
-- `GET /models`: Available models
-
-## Monitoring
-
-Access monitoring dashboards:
-
-- **Grafana**: http://localhost:3000 (admin/admin)
-- **Prometheus**: http://localhost:9090
-- **Jaeger**: http://localhost:16686
-
-## Development Commands
-
-```bash
-make help          # Show all available commands
-make setup         # Install dependencies
-make proto         # Generate gRPC stubs
-make build         # Build Docker images
-make test          # Run tests
-make clean         # Clean generated files
-make docker-up     # Start all services
-make docker-down   # Stop all services
-make logs          # View service logs
-make monitor       # Open monitoring dashboards
+Edit `config/distributed_config.yaml`:
+```yaml
+nodes:
+  - id: "node-1"
+    address: "10.201.20.10:50052"
+  - id: "node-2"
+    address: "10.201.20.12:50052"
 ```
-
-## Next Steps
-
-This project structure provides the foundation for implementing the MLX distributed inference server. The next tasks involve:
-
-1. Implementing the gRPC communication layer
-2. Building the coordinator service with worker management
-3. Creating the native MLX worker implementation
-4. Developing the FastAPI server with OpenAI compatibility
-5. Setting up monitoring and observability
-6. Adding comprehensive error handling and resilience
-
-See the `tasks.md` file in the spec directory for the complete implementation plan.
 
 ## License
 
-[Add your license here]
+MIT
