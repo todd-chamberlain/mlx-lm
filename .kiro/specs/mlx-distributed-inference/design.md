@@ -563,4 +563,359 @@ device:
   gpu_memory_fraction: 0.8
 ```
 
-This design provides a comprehensive foundation for implementing the MLX distributed inference server with all the architectural components, interfaces, and considerations needed for a production-ready system.
+## Advanced Memory Management
+
+### Memory Pooling Architecture
+
+The system implements tensor memory pooling to reduce allocation overhead and improve memory efficiency:
+
+```python
+class TensorMemoryPool:
+    """Global memory pool for tensor reuse."""
+    
+    def __init__(self, max_pool_size_bytes: int = 2 * 1024**3):
+        self.pools: Dict[Tuple[tuple, str], List[PooledTensor]] = {}
+        self.max_pool_size = max_pool_size_bytes
+        self.stats = MemoryPoolStats()
+        
+    def allocate(self, shape: tuple, dtype) -> mx.array:
+        """Allocate tensor from pool or create new."""
+        pool_key = (shape, str(dtype))
+        
+        # Try to reuse from pool
+        if pool_key in self.pools and self.pools[pool_key]:
+            tensor = self.pools[pool_key].pop()
+            self.stats.cache_hits += 1
+            return tensor.array
+        
+        # Allocate new tensor
+        self.stats.cache_misses += 1
+        return mx.zeros(shape, dtype=dtype)
+    
+    def release(self, tensor: mx.array):
+        """Return tensor to pool for reuse."""
+        pool_key = (tuple(tensor.shape), str(tensor.dtype))
+        
+        if self.get_total_allocated() < self.max_pool_size:
+            pooled = PooledTensor(tensor, pool_key)
+            self.pools.setdefault(pool_key, []).append(pooled)
+```
+
+**Expected Performance:**
+- 80-95% tensor reuse rate
+- 20-30% memory overhead reduction
+- Automatic cleanup under memory pressure
+
+### Garbage Collection Optimization
+
+The system optimizes Python's garbage collection for inference workloads:
+
+```python
+class GCOptimizer:
+    """Optimize garbage collection for inference workloads."""
+    
+    def __init__(self):
+        self.gc_threshold = (10000, 20, 20)  # Increased gen 0 threshold
+        self.manual_gc_enabled = False
+        
+    def tune_for_inference(self):
+        """Tune GC for inference workload."""
+        # Disable automatic GC during inference
+        gc.disable()
+        self.manual_gc_enabled = True
+        
+        # Increase generation 0 threshold
+        gc.set_threshold(*self.gc_threshold)
+        
+    def manual_gc_cycle(self):
+        """Trigger manual GC between requests."""
+        if self.manual_gc_enabled:
+            gc.collect(generation=0)
+```
+
+**Integration with Inference Engine:**
+```python
+class InferenceEngine:
+    def __init__(self):
+        self.gc_optimizer = GCOptimizer()
+        self.gc_optimizer.tune_for_inference()
+        
+    async def process_inference(self, request):
+        # Process inference
+        result = await self._run_inference(request)
+        
+        # Manual GC after request
+        self.gc_optimizer.manual_gc_cycle()
+        
+        return result
+```
+
+**Expected Performance:**
+- 30-50% GC pause reduction
+- More predictable latency
+- Reduced GC overhead
+
+### Tensor Lifecycle Management
+
+The system tracks tensor lifecycles to enable eager deallocation:
+
+```python
+class TensorLifecycleManager:
+    """Manage tensor lifecycle for efficient memory usage."""
+    
+    def __init__(self):
+        self.tracked_tensors: Dict[str, PooledTensor] = {}
+        self.reference_counts: Dict[str, int] = {}
+        
+    def track_tensor(self, tensor_id: str, tensor: mx.array):
+        """Track tensor for lifecycle management."""
+        self.tracked_tensors[tensor_id] = tensor
+        self.reference_counts[tensor_id] = 1
+        
+    def increment_reference(self, tensor_id: str):
+        """Increment reference count."""
+        if tensor_id in self.reference_counts:
+            self.reference_counts[tensor_id] += 1
+            
+    def release_tensor(self, tensor_id: str):
+        """Release tensor when no longer needed."""
+        if tensor_id not in self.reference_counts:
+            return
+            
+        self.reference_counts[tensor_id] -= 1
+        
+        if self.reference_counts[tensor_id] == 0:
+            # Eagerly deallocate
+            if tensor_id in self.tracked_tensors:
+                del self.tracked_tensors[tensor_id]
+                mx.metal.clear_cache()
+```
+
+**Expected Performance:**
+- 15-25% memory reduction
+- No memory leaks
+- Accurate reference tracking
+
+## Distributed Cache Coherence
+
+### KV Cache Serialization
+
+To support multi-turn conversations in distributed inference, the system serializes and transfers KV cache between pipeline stages:
+
+```python
+# In activation_transfer.py
+def serialize_kv_cache(self, cache: List[Tuple[mx.array, mx.array]]) -> bytes:
+    """Serialize KV cache for transfer."""
+    # Serialize each (key, value) pair
+    # Add to existing serialization format
+    pass
+
+def deserialize_kv_cache(self, data: bytes) -> List[Tuple[mx.array, mx.array]]:
+    """Deserialize KV cache from transfer."""
+    # Parse cache data
+    # Return list of (key, value) tuples
+    pass
+```
+
+**Protocol Update:**
+```protobuf
+// In proto/distributed.proto
+message ForwardPassRequest {
+    // ... existing fields ...
+    bytes cache_data = 10;  // Serialized KV cache
+}
+
+message ForwardPassResponse {
+    // ... existing fields ...
+    bytes updated_cache = 10;  // Updated KV cache
+}
+```
+
+**Integration:**
+```python
+# In worker/distributed_forward.py (line 420)
+async def forward_with_cache(self, request):
+    # Serialize cache for request
+    if self.cache:
+        cache_data = self.activation_transfer.serialize_kv_cache(self.cache)
+        request.cache_data = cache_data
+    
+    # Forward to next stage
+    response = await self.forward_distributed(request)
+    
+    # Deserialize updated cache
+    if response.updated_cache:
+        self.cache = self.activation_transfer.deserialize_kv_cache(
+            response.updated_cache
+        )
+```
+
+## Memory-Aware Partitioning
+
+For heterogeneous clusters with different memory capacities, the system implements memory-aware layer partitioning:
+
+```python
+class ModelPartitioner:
+    def _profile_layer_memory(self, model_name: str, layer_idx: int) -> int:
+        """Profile memory usage of a single layer."""
+        # Load layer
+        # Measure memory before/after
+        # Return memory delta in bytes
+        pass
+    
+    def _partition_memory_aware(
+        self,
+        total_layers: int,
+        nodes: List[Dict[str, Any]]
+    ) -> List[LayerAssignment]:
+        """Partition based on available memory."""
+        # Get layer memory requirements
+        layer_memory = self.profile_model_memory(model_name, total_layers)
+        
+        # Get available memory per node
+        node_memory = [node['available_memory'] for node in nodes]
+        
+        # Bin packing algorithm
+        assignments = []
+        current_node = 0
+        current_memory = 0
+        current_layers = []
+        
+        for layer_idx, mem_required in enumerate(layer_memory):
+            if current_memory + mem_required > node_memory[current_node]:
+                # Move to next node
+                assignments.append(LayerAssignment(
+                    node_id=nodes[current_node]['node_id'],
+                    start_layer=current_layers[0],
+                    end_layer=current_layers[-1] + 1
+                ))
+                current_node += 1
+
+                current_memory = 0
+                current_layers = []
+            
+            current_memory += mem_required
+            current_layers.append(layer_idx)
+        
+        return assignments
+```
+
+**Comparison with Balanced Partitioning:**
+- Balanced: Equal layers per node (may overload low-memory nodes)
+- Memory-aware: Distributes based on actual memory capacity
+- Use case: Heterogeneous clusters with different Mac models
+
+## Production Deployment Strategy
+
+### Deployment Phases
+
+**Phase 1: Single Node Validation (Day 1)**
+- Deploy worker on Mac Studio 1
+- Verify model loading and inference
+- Test metrics collection
+- Validate performance baselines
+
+**Phase 2: Distributed Setup (Days 2-3)**
+- Deploy worker on Mac Studio 2
+- Configure coordinator and API server
+- Test distributed inference pipeline
+- Verify activation transfer
+
+**Phase 3: Monitoring Stack (Days 4-5)**
+- Deploy Prometheus, Grafana, Jaeger
+- Configure dashboards and alerts
+- Test metrics collection
+- Validate tracing
+
+**Phase 4: Load Testing (Days 6-7)**
+- Run sustained load tests (1 hour)
+- Run spike tests (10 minutes)
+- Run stress tests (30 minutes)
+- Run stability tests (24 hours)
+
+**Phase 5: Optimization (Days 8-10)**
+- Analyze performance data
+- Tune configuration parameters
+- Re-run tests to validate improvements
+- Document best practices
+
+### Performance Targets
+
+**Latency Targets:**
+- P50: < 100ms (excluding generation time)
+- P95: < 200ms (excluding generation time)
+- P99: < 500ms (excluding generation time)
+
+**Throughput Targets:**
+- Per worker: 30-50 tokens/sec (7B 4-bit model)
+- Cluster: Linear scaling with worker count
+- GPU utilization: 75-95%
+
+**Reliability Targets:**
+- Error rate: < 1%
+- Uptime: 99.9%
+- Cache hit rate: 40-60%
+- Batch efficiency: 95%+
+
+### Monitoring and Alerting
+
+**Critical Alerts:**
+- Worker unavailable (no heartbeat for 30s)
+- High error rate (>5% over 5 minutes)
+- High latency (P95 > 500ms for 5 minutes)
+- Memory pressure (>90% utilization)
+- Low throughput (<20 tokens/sec for 5 minutes)
+
+**Warning Alerts:**
+- Moderate error rate (>2% over 5 minutes)
+- Elevated latency (P95 > 300ms for 5 minutes)
+- Memory pressure (>80% utilization)
+- Cache hit rate low (<30%)
+- GC pause frequency high (>10/minute)
+
+### Configuration Tuning Guide
+
+**Batch Processing:**
+```yaml
+batch_manager:
+  max_batch_size: 32  # Adjust based on GPU memory
+  max_wait_time_ms: 50  # Balance latency vs throughput
+  adaptive_sizing: true
+  target_gpu_utilization: 0.85
+```
+
+**Memory Management:**
+```yaml
+memory_pool:
+  max_pool_size_gb: 8  # Adjust based on available memory
+  max_idle_seconds: 600
+  enable_auto_cleanup: true
+
+gc_optimizer:
+  manual_gc_enabled: true
+  gc_threshold: [10000, 20, 20]
+```
+
+**Caching:**
+```yaml
+activation_cache:
+  max_size_gb: 4
+  ttl_seconds: 3600
+  eviction_policy: lru
+
+kv_cache:
+  enable_sharing: true
+  enable_compression: true
+  compression_level: 3
+```
+
+**Worker Pool:**
+```yaml
+coordinator:
+  max_concurrent_per_worker: 4
+  health_check_interval_seconds: 10
+  unhealthy_threshold_seconds: 30
+  removal_threshold_seconds: 120
+```
+
+This design provides a comprehensive foundation for implementing the MLX distributed inference server with all the architectural components, interfaces, and considerations needed for a production-ready system, including advanced memory management, distributed cache coherence, and production deployment strategies.

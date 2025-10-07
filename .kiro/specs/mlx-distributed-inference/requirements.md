@@ -125,3 +125,51 @@ This document specifies the requirements for a production-ready hybrid MLX distr
 3. WHEN setting up networking THEN services SHALL automatically discover each other within Docker networks
 4. WHEN managing models THEN workers SHALL support loading different model formats and sizes
 5. WHEN updating configuration THEN services SHALL support hot-reloading of non-critical settings
+
+### Requirement 11: Memory Optimization
+
+**User Story:** As a performance engineer, I want optimized memory management, so that the system can handle long-running workloads efficiently without memory leaks or excessive overhead.
+
+#### Acceptance Criteria
+
+1. WHEN allocating tensors THEN the system SHALL reuse tensors from memory pools achieving 80-95% reuse rate
+2. WHEN running inference THEN garbage collection pauses SHALL be reduced by 30-50% through GC optimization
+3. WHEN tracking tensors THEN the system SHALL implement eager deallocation reducing memory usage by 15-25%
+4. WHEN monitoring memory THEN the system SHALL detect and report memory leaks through lifecycle tracking
+5. WHEN under memory pressure THEN the system SHALL automatically trigger cleanup and respond appropriately
+
+### Requirement 12: Distributed Cache Coherence
+
+**User Story:** As a system architect, I want cache consistency across distributed workers, so that multi-turn conversations can benefit from cached activations and KV cache across the pipeline.
+
+#### Acceptance Criteria
+
+1. WHEN processing distributed inference THEN activation cache SHALL be serialized and transferred between pipeline stages
+2. WHEN handling multi-turn conversations THEN KV cache SHALL be propagated through the distributed forward pass
+3. WHEN updating cache THEN cache data SHALL be included in gRPC messages between workers
+4. WHEN deserializing cache THEN the system SHALL integrate updates with the KVCacheManager
+5. WHEN testing multi-turn THEN distributed cache propagation SHALL maintain consistency and improve performance
+
+### Requirement 13: Heterogeneous Cluster Support
+
+**User Story:** As a cluster administrator, I want memory-aware partitioning, so that I can efficiently utilize workers with different memory capacities.
+
+#### Acceptance Criteria
+
+1. WHEN profiling models THEN the system SHALL measure per-layer memory requirements accurately
+2. WHEN partitioning layers THEN the system SHALL consider actual memory capacity of each worker
+3. WHEN distributing work THEN memory-aware partitioning SHALL prevent overloading workers with insufficient memory
+4. WHEN comparing strategies THEN memory-aware partitioning SHALL show better utilization than balanced partitioning for heterogeneous clusters
+5. WHEN configuring THEN the system SHALL support both balanced and memory-aware partitioning strategies
+
+### Requirement 14: Production Readiness Validation
+
+**User Story:** As a production operator, I want validated performance under real-world conditions, so that I can confidently deploy the system to serve production traffic.
+
+#### Acceptance Criteria
+
+1. WHEN deploying to physical hardware THEN workers SHALL successfully register and operate on Mac Studio machines
+2. WHEN running load tests THEN the system SHALL maintain latency targets (P95 < 200ms) under sustained load
+3. WHEN stress testing THEN the system SHALL achieve throughput targets (>50 tokens/sec) with error rate < 1%
+4. WHEN running for 24 hours THEN the system SHALL remain stable with no memory leaks or degradation
+5. WHEN monitoring production THEN comprehensive metrics SHALL be available through Prometheus and Grafana dashboards

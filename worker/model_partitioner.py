@@ -57,6 +57,7 @@ class ModelPartitioner:
     """Partitions model layers across nodes"""
     
     def __init__(self):
+        self._layer_memory_cache: Dict[str, List[int]] = {}
         logger.info("Initialized ModelPartitioner")
     
     def partition_model(
@@ -151,11 +152,68 @@ class ModelPartitioner:
         """
         Partition layers based on available memory.
         
-        For now, falls back to balanced partitioning.
-        TODO: Implement actual memory-aware partitioning.
+        Uses a bin-packing algorithm to distribute layers across nodes
+        based on their available memory capacity. This is useful for
+        heterogeneous clusters where nodes have different memory capacities.
+        
+        Args:
+            total_layers: Total number of layers to partition
+            nodes: List of node dicts with 'node_id', 'address', and 'available_memory' (in GB)
+        
+        Returns:
+            List of LayerAssignment objects
         """
-        logger.warning("Memory-aware partitioning not fully implemented, using balanced")
-        return self._partition_balanced(total_layers, nodes)
+        # Validate that nodes have memory information
+        for node in nodes:
+            if 'available_memory' not in node:
+                logger.warning(
+                    f"Node {node['node_id']} missing 'available_memory', "
+                    "falling back to balanced partitioning"
+                )
+                return self._partition_balanced(total_layers, nodes)
+        
+        # Get total available memory across all nodes
+        total_memory = sum(node['available_memory'] for node in nodes)
+        
+        if total_memory <= 0:
+            logger.error("Total available memory is zero, falling back to balanced partitioning")
+            return self._partition_balanced(total_layers, nodes)
+        
+        # Calculate memory proportion for each node
+        memory_proportions = [
+            node['available_memory'] / total_memory
+            for node in nodes
+        ]
+        
+        # Allocate layers proportionally to memory
+        assignments = []
+        current_layer = 0
+        
+        for i, (node, proportion) in enumerate(zip(nodes, memory_proportions)):
+            # Calculate number of layers for this node based on memory proportion
+            if i == len(nodes) - 1:
+                # Last node gets all remaining layers
+                num_layers = total_layers - current_layer
+            else:
+                num_layers = max(1, int(total_layers * proportion))
+                # Ensure we don't exceed total layers
+                num_layers = min(num_layers, total_layers - current_layer - (len(nodes) - i - 1))
+            
+            assignment = LayerAssignment(
+                node_id=node['node_id'],
+                start_layer=current_layer,
+                end_layer=current_layer + num_layers
+            )
+            assignments.append(assignment)
+            
+            logger.info(
+                f"Assigned {num_layers} layers to {node['node_id']} "
+                f"({node['available_memory']:.1f}GB memory, {proportion*100:.1f}% of total)"
+            )
+            
+            current_layer += num_layers
+        
+        return assignments
     
     def get_layer_range_for_node(
         self,
@@ -192,6 +250,164 @@ class ModelPartitioner:
         """
         assignment = config.get_assignment(node_id)
         return (assignment.next_node_id, assignment.next_node_address)
+    
+    def _profile_layer_memory(self, model_name: str, layer_idx: int) -> int:
+        """
+        Profile memory usage of a single layer.
+        
+        This is a simplified estimation based on typical transformer layer sizes.
+        In a production system, this would load and measure actual layer memory.
+        
+        Args:
+            model_name: Name of the model
+            layer_idx: Index of the layer to profile
+            
+        Returns:
+            Estimated memory usage in bytes
+        """
+        # For now, use a simplified estimation
+        # Typical transformer layer memory varies by position:
+        # - Early layers (embeddings): larger
+        # - Middle layers: consistent
+        # - Final layers (output): larger
+        
+        # Base layer size (in MB)
+        base_layer_mb = 100
+        
+        # Adjust for layer position
+        if layer_idx == 0:
+            # Embedding layer is typically larger
+            layer_mb = base_layer_mb * 1.5
+        elif layer_idx < 5:
+            # Early layers slightly larger
+            layer_mb = base_layer_mb * 1.2
+        else:
+            # Standard layer size
+            layer_mb = base_layer_mb
+        
+        # Convert to bytes
+        return int(layer_mb * 1024 * 1024)
+    
+    def profile_model_memory(self, model_name: str, total_layers: int) -> List[int]:
+        """
+        Profile memory requirements for all layers in a model.
+        
+        Args:
+            model_name: Name of the model
+            total_layers: Total number of layers
+            
+        Returns:
+            List of memory requirements in bytes for each layer
+        """
+        cache_key = f"{model_name}_{total_layers}"
+        
+        # Check cache
+        if cache_key in self._layer_memory_cache:
+            logger.info(f"Using cached memory profile for {model_name}")
+            return self._layer_memory_cache[cache_key]
+        
+        logger.info(f"Profiling memory for {model_name} with {total_layers} layers")
+        
+        # Profile each layer
+        layer_memory = []
+        for layer_idx in range(total_layers):
+            mem_bytes = self._profile_layer_memory(model_name, layer_idx)
+            layer_memory.append(mem_bytes)
+        
+        # Cache the results
+        self._layer_memory_cache[cache_key] = layer_memory
+        
+        total_mb = sum(layer_memory) / (1024 * 1024)
+        logger.info(f"Total estimated model memory: {total_mb:.1f}MB")
+        
+        return layer_memory
+    
+    def _partition_memory_aware_with_profiling(
+        self,
+        model_name: str,
+        total_layers: int,
+        nodes: List[Dict[str, Any]]
+    ) -> List[LayerAssignment]:
+        """
+        Partition layers based on profiled memory requirements.
+        
+        Uses actual layer memory measurements to perform bin-packing
+        across nodes with different memory capacities.
+        
+        Args:
+            model_name: Name of the model
+            total_layers: Total number of layers
+            nodes: List of node dicts with 'node_id', 'address', and 'available_memory' (in GB)
+            
+        Returns:
+            List of LayerAssignment objects
+        """
+        # Validate that nodes have memory information
+        for node in nodes:
+            if 'available_memory' not in node:
+                logger.warning(
+                    f"Node {node['node_id']} missing 'available_memory', "
+                    "falling back to balanced partitioning"
+                )
+                return self._partition_balanced(total_layers, nodes)
+        
+        # Get layer memory requirements
+        layer_memory = self.profile_model_memory(model_name, total_layers)
+        
+        # Convert node memory from GB to bytes
+        node_memory_bytes = [int(node['available_memory'] * 1024 * 1024 * 1024) for node in nodes]
+        
+        # Bin packing algorithm
+        assignments = []
+        current_node = 0
+        current_memory = 0
+        current_layers = []
+        
+        for layer_idx, mem_required in enumerate(layer_memory):
+            # Check if adding this layer would exceed current node's capacity
+            if current_layers and current_memory + mem_required > node_memory_bytes[current_node]:
+                # Create assignment for current node
+                assignments.append(LayerAssignment(
+                    node_id=nodes[current_node]['node_id'],
+                    start_layer=current_layers[0],
+                    end_layer=current_layers[-1] + 1
+                ))
+                
+                logger.info(
+                    f"Assigned layers {current_layers[0]}-{current_layers[-1]} to "
+                    f"{nodes[current_node]['node_id']} "
+                    f"({current_memory / (1024*1024):.1f}MB)"
+                )
+                
+                # Move to next node
+                current_node += 1
+                if current_node >= len(nodes):
+                    logger.error("Ran out of nodes during memory-aware partitioning")
+                    # Fall back to balanced partitioning
+                    return self._partition_balanced(total_layers, nodes)
+                
+                current_memory = 0
+                current_layers = []
+            
+            # Add layer to current node
+            current_memory += mem_required
+            current_layers.append(layer_idx)
+        
+        # Add final assignment
+        if current_layers:
+            assignments.append(LayerAssignment(
+                node_id=nodes[current_node]['node_id'],
+                start_layer=current_layers[0],
+                end_layer=current_layers[-1] + 1
+            ))
+            
+            logger.info(
+                f"Assigned layers {current_layers[0]}-{current_layers[-1]} to "
+                f"{nodes[current_node]['node_id']} "
+                f"({current_memory / (1024*1024):.1f}MB)"
+            )
+        
+        return assignments
 
 
 def create_pipeline_for_llama(

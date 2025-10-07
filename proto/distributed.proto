@@ -131,6 +131,7 @@ message ForwardPassRequest {
     repeated int32 shape = 7;
     string dtype = 8;
     bool use_cache = 9;
+    bytes cache_data = 10;  // Serialized KV cache from previous stages
 }
 
 // Forward pass response
@@ -140,6 +141,7 @@ message ForwardPassResponse {
     repeated int32 shape = 3;
     string dtype = 4;
     int64 compute_time_ms = 5;
+    bytes updated_cache = 6;  // Updated KV cache for next stages
 }
 
 // Distributed inference service

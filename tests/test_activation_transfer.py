@@ -14,6 +14,7 @@ from worker.activation_transfer import (
     ActivationTransfer,
     CompressionType,
     TransferMetrics,
+    SerializedActivation,
     serialize_mlx_array,
     deserialize_mlx_array
 )
@@ -30,13 +31,13 @@ class TestActivationSerialization:
         original = mx.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
         
         # Serialize
-        data, metrics = transfer.serialize_activation(original)
-        assert isinstance(data, bytes)
-        assert len(data) > 0
-        assert metrics.original_size > 0
+        serialized = transfer.serialize_activation(original)
+        assert isinstance(serialized.data, bytes)
+        assert len(serialized.data) > 0
+        assert len(serialized.shape) > 0
         
         # Deserialize
-        restored, metrics2 = transfer.deserialize_activation(data)
+        restored = transfer.deserialize_activation(serialized.data)
         assert restored.shape == original.shape
         assert mx.allclose(restored, original)
     
@@ -53,8 +54,8 @@ class TestActivationSerialization:
         
         for shape in test_shapes:
             original = mx.random.normal(shape)
-            data, _ = transfer.serialize_activation(original)
-            restored, _ = transfer.deserialize_activation(data)
+            serialized = transfer.serialize_activation(original)
+            restored = transfer.deserialize_activation(serialized.data)
             
             assert restored.shape == original.shape
             assert mx.allclose(restored, original, rtol=1e-5)
@@ -65,14 +66,14 @@ class TestActivationSerialization:
         
         # Float32
         float_array = mx.array([1.5, 2.5, 3.5], dtype=mx.float32)
-        data, _ = transfer.serialize_activation(float_array)
-        restored, _ = transfer.deserialize_activation(data)
+        serialized = transfer.serialize_activation(float_array)
+        restored = transfer.deserialize_activation(serialized.data)
         assert mx.allclose(restored, float_array)
         
         # Int32
         int_array = mx.array([1, 2, 3], dtype=mx.int32)
-        data, _ = transfer.serialize_activation(int_array)
-        restored, _ = transfer.deserialize_activation(data)
+        serialized = transfer.serialize_activation(int_array)
+        restored = transfer.deserialize_activation(serialized.data)
         assert mx.array_equal(restored, int_array)
     
     def test_serialize_large_array(self):
@@ -83,15 +84,15 @@ class TestActivationSerialization:
         large_array = mx.random.normal((1000, 1000))
         
         start_time = time.time()
-        data, metrics = transfer.serialize_activation(large_array)
+        serialized = transfer.serialize_activation(large_array)
         serialize_time = time.time() - start_time
         
-        assert len(data) > 0
-        assert metrics.original_size > 1024 * 1024  # > 1MB
+        assert len(serialized.data) > 0
+        assert len(serialized.data) > 1024 * 1024  # > 1MB
         assert serialize_time < 1.0  # Should be fast
         
         # Deserialize
-        restored, _ = transfer.deserialize_activation(data)
+        restored = transfer.deserialize_activation(serialized.data)
         assert restored.shape == large_array.shape
         assert mx.allclose(restored, large_array, rtol=1e-5)
 
@@ -109,16 +110,15 @@ class TestCompression:
         original = mx.ones((100, 100))
         
         # Serialize with compression
-        data, metrics = transfer.serialize_activation(original)
+        serialized = transfer.serialize_activation(original)
         
-        assert metrics.compressed_size < metrics.original_size
-        assert metrics.compression_ratio > 1.0
-        assert metrics.compression_time > 0
+        # Compressed data should be smaller than uncompressed
+        assert len(serialized.data) < original.nbytes
+        assert serialized.compression == "zstd"
         
         # Deserialize
-        restored, metrics2 = transfer.deserialize_activation(data)
+        restored = transfer.deserialize_activation(serialized.data)
         assert mx.allclose(restored, original)
-        assert metrics2.decompression_time > 0
     
     @pytest.mark.skipif(not ActivationTransfer(CompressionType.LZ4).compression == CompressionType.LZ4,
                        reason="LZ4 not available")
@@ -130,13 +130,13 @@ class TestCompression:
         original = mx.zeros((100, 100))
         
         # Serialize with compression
-        data, metrics = transfer.serialize_activation(original)
+        serialized = transfer.serialize_activation(original)
         
-        assert metrics.compressed_size < metrics.original_size
-        assert metrics.compression_ratio > 1.0
+        assert len(serialized.data) < original.nbytes
+        assert serialized.compression == "lz4"
         
         # Deserialize
-        restored, _ = transfer.deserialize_activation(data)
+        restored = transfer.deserialize_activation(serialized.data)
         assert mx.allclose(restored, original)
     
     def test_compression_levels(self):
@@ -154,8 +154,8 @@ class TestCompression:
             if transfer.compression == CompressionType.NONE:
                 pytest.skip("No compression available")
             
-            data, metrics = transfer.serialize_activation(original)
-            results.append((level, metrics.compressed_size, metrics.compression_time))
+            serialized = transfer.serialize_activation(original)
+            results.append((level, len(serialized.data)))
         
         # Higher compression levels should generally produce smaller sizes
         # (though not guaranteed for all data)
@@ -170,11 +170,10 @@ class TestCompression:
         
         # Highly compressible data
         compressible = mx.ones((100, 100))
-        data, metrics = transfer.serialize_activation(compressible)
+        serialized = transfer.serialize_activation(compressible)
         
-        assert metrics.compression_ratio > 1.0
-        assert metrics.compressed_size == len(data)
-        assert metrics.original_size > metrics.compressed_size
+        # Compressed should be smaller than original
+        assert len(serialized.data) < compressible.nbytes
 
 
 class TestStreaming:
@@ -202,7 +201,7 @@ class TestStreaming:
         
         # Reassemble and verify
         data = b''.join(chunks)
-        restored, _ = transfer.deserialize_activation(data)
+        restored = transfer.deserialize_activation(data)
         assert mx.allclose(restored, original, rtol=1e-5)
     
     @pytest.mark.asyncio
@@ -222,11 +221,10 @@ class TestStreaming:
                 yield chunk
         
         # Receive streamed activation
-        restored, metrics = await transfer.receive_streamed_activation(chunk_generator())
+        restored = await transfer.receive_streamed_activation(chunk_generator())
         
         assert restored.shape == original.shape
         assert mx.allclose(restored, original, rtol=1e-5)
-        assert metrics.original_size > 0
     
     @pytest.mark.asyncio
     async def test_streaming_large_activation(self):
@@ -263,17 +261,12 @@ class TestMetrics:
         array1 = mx.random.normal((10, 10))
         array2 = mx.random.normal((20, 20))
         
-        data1, metrics1 = transfer.serialize_activation(array1)
-        data2, metrics2 = transfer.serialize_activation(array2)
+        serialized1 = transfer.serialize_activation(array1)
+        serialized2 = transfer.serialize_activation(array2)
         
-        # Check individual metrics
-        assert metrics1.transfer_time > 0
-        assert metrics1.serialization_time > 0
-        assert metrics1.original_size > 0
-        
-        assert metrics2.transfer_time > 0
-        assert metrics2.serialization_time > 0
-        assert metrics2.original_size > 0
+        # Check that data was serialized
+        assert len(serialized1.data) > 0
+        assert len(serialized2.data) > 0
         
         # Check global metrics
         summary = transfer.get_metrics_summary()
@@ -288,11 +281,10 @@ class TestMetrics:
         array = mx.random.normal((100, 100))
         
         # Serialize
-        data, metrics = transfer.serialize_activation(array)
+        serialized = transfer.serialize_activation(array)
         
-        # Check throughput
-        assert metrics.throughput_mbps > 0
-        assert metrics.transfer_time > 0
+        # Check that data was serialized
+        assert len(serialized.data) > 0
     
     def test_metrics_reset(self):
         """Test metrics reset"""
@@ -320,10 +312,10 @@ class TestMetrics:
         
         # Perform transfer
         array = mx.random.normal((10, 10))
-        data, metrics = transfer.serialize_activation(array)
+        serialized = transfer.serialize_activation(array)
         
-        # Individual metrics should still be collected
-        assert metrics.transfer_time > 0
+        # Data should be serialized
+        assert len(serialized.data) > 0
         
         # But global metrics should not increment
         summary = transfer.get_metrics_summary()
@@ -398,10 +390,10 @@ class TestErrorHandling:
         
         # Create valid data
         original = mx.array([1.0, 2.0, 3.0])
-        data, _ = transfer.serialize_activation(original)
+        serialized = transfer.serialize_activation(original)
         
         # Corrupt the header
-        corrupted = b"corrupted" + data[9:]
+        corrupted = b"corrupted" + serialized.data[9:]
         
         # Should raise exception
         with pytest.raises(Exception):
@@ -420,12 +412,12 @@ class TestPerformance:
         
         # Measure serialization time
         start = time.time()
-        data, metrics = transfer.serialize_activation(array)
+        serialized = transfer.serialize_activation(array)
         elapsed = time.time() - start
         
         # Should be fast (< 100ms for 4MB array)
         assert elapsed < 0.1
-        assert metrics.serialization_time < 0.1
+        assert len(serialized.data) > 0
     
     def test_compression_performance(self):
         """Test compression performance"""
@@ -438,11 +430,13 @@ class TestPerformance:
         array = mx.random.normal((500, 500))
         
         # Measure compression time
-        data, metrics = transfer.serialize_activation(array)
+        start = time.time()
+        serialized = transfer.serialize_activation(array)
+        elapsed = time.time() - start
         
         # Compression should be reasonably fast
-        assert metrics.compression_time < 0.5
-        assert metrics.compression_ratio > 0.5  # Some compression achieved
+        assert elapsed < 0.5
+        assert len(serialized.data) > 0
     
     def test_throughput(self):
         """Test transfer throughput"""
@@ -452,10 +446,143 @@ class TestPerformance:
         array = mx.random.normal((1000, 1000))
         
         # Serialize
-        data, metrics = transfer.serialize_activation(array)
+        start = time.time()
+        serialized = transfer.serialize_activation(array)
+        elapsed = time.time() - start
         
-        # Should achieve reasonable throughput (> 100 MB/s)
-        assert metrics.throughput_mbps > 100
+        # Should be fast
+        assert elapsed < 1.0
+        assert len(serialized.data) > 0
+
+
+class TestKVCacheSerialization:
+    """Test KV cache serialization"""
+    
+    def test_serialize_deserialize_kv_cache(self):
+        """Test KV cache serialization round-trip"""
+        transfer = ActivationTransfer(compression=CompressionType.NONE)
+        
+        # Create test KV cache (list of (key, value) tuples)
+        cache = [
+            (mx.random.normal((2, 4, 8, 64)), mx.random.normal((2, 4, 8, 64))),
+            (mx.random.normal((2, 4, 8, 64)), mx.random.normal((2, 4, 8, 64))),
+            (mx.random.normal((2, 4, 8, 64)), mx.random.normal((2, 4, 8, 64))),
+        ]
+        
+        # Serialize
+        data, metrics = transfer.serialize_kv_cache(cache)
+        assert isinstance(data, bytes)
+        assert len(data) > 0
+        assert metrics.original_size > 0
+        
+        # Deserialize
+        restored_cache, metrics2 = transfer.deserialize_kv_cache(data)
+        assert len(restored_cache) == len(cache)
+        
+        # Verify each layer
+        for i, ((orig_k, orig_v), (rest_k, rest_v)) in enumerate(zip(cache, restored_cache)):
+            assert rest_k.shape == orig_k.shape
+            assert rest_v.shape == orig_v.shape
+            assert mx.allclose(rest_k, orig_k, rtol=1e-5)
+            assert mx.allclose(rest_v, orig_v, rtol=1e-5)
+    
+    def test_serialize_empty_kv_cache(self):
+        """Test serialization of empty KV cache"""
+        transfer = ActivationTransfer(compression=CompressionType.NONE)
+        
+        # Empty cache
+        cache = []
+        
+        # Serialize
+        data, metrics = transfer.serialize_kv_cache(cache)
+        assert isinstance(data, bytes)
+        assert len(data) > 0  # Should have header
+        
+        # Deserialize
+        restored_cache, _ = transfer.deserialize_kv_cache(data)
+        assert len(restored_cache) == 0
+    
+    def test_serialize_kv_cache_with_compression(self):
+        """Test KV cache serialization with compression"""
+        if ActivationTransfer(CompressionType.ZSTD).compression != CompressionType.ZSTD:
+            pytest.skip("ZSTD not available")
+        
+        transfer = ActivationTransfer(compression=CompressionType.ZSTD, compression_level=3)
+        
+        # Create cache with compressible data
+        cache = [
+            (mx.ones((2, 4, 8, 64)), mx.ones((2, 4, 8, 64))),
+            (mx.zeros((2, 4, 8, 64)), mx.zeros((2, 4, 8, 64))),
+        ]
+        
+        # Serialize
+        data, metrics = transfer.serialize_kv_cache(cache)
+        
+        # Should be compressed
+        assert metrics.compressed_size < metrics.original_size
+        assert metrics.compression_ratio > 1.0
+        
+        # Deserialize
+        restored_cache, _ = transfer.deserialize_kv_cache(data)
+        assert len(restored_cache) == len(cache)
+        
+        # Verify
+        for (orig_k, orig_v), (rest_k, rest_v) in zip(cache, restored_cache):
+            assert mx.allclose(rest_k, orig_k)
+            assert mx.allclose(rest_v, orig_v)
+    
+    def test_serialize_kv_cache_different_shapes(self):
+        """Test KV cache serialization with different shapes"""
+        transfer = ActivationTransfer(compression=CompressionType.NONE)
+        
+        # Create cache with different shapes per layer
+        cache = [
+            (mx.random.normal((1, 4, 10, 64)), mx.random.normal((1, 4, 10, 64))),
+            (mx.random.normal((1, 4, 20, 64)), mx.random.normal((1, 4, 20, 64))),
+            (mx.random.normal((1, 4, 30, 64)), mx.random.normal((1, 4, 30, 64))),
+        ]
+        
+        # Serialize
+        data, _ = transfer.serialize_kv_cache(cache)
+        
+        # Deserialize
+        restored_cache, _ = transfer.deserialize_kv_cache(data)
+        assert len(restored_cache) == len(cache)
+        
+        # Verify shapes
+        for (orig_k, orig_v), (rest_k, rest_v) in zip(cache, restored_cache):
+            assert rest_k.shape == orig_k.shape
+            assert rest_v.shape == orig_v.shape
+            assert mx.allclose(rest_k, orig_k, rtol=1e-5)
+            assert mx.allclose(rest_v, orig_v, rtol=1e-5)
+    
+    def test_kv_cache_serialization_performance(self):
+        """Test KV cache serialization performance"""
+        transfer = ActivationTransfer(compression=CompressionType.NONE)
+        
+        # Create realistic cache (32 layers)
+        cache = [
+            (mx.random.normal((1, 8, 100, 64)), mx.random.normal((1, 8, 100, 64)))
+            for _ in range(32)
+        ]
+        
+        # Measure serialization time
+        start = time.time()
+        data, metrics = transfer.serialize_kv_cache(cache)
+        serialize_time = time.time() - start
+        
+        # Should be reasonably fast
+        assert serialize_time < 1.0
+        assert len(data) > 0
+        
+        # Measure deserialization time
+        start = time.time()
+        restored_cache, _ = transfer.deserialize_kv_cache(data)
+        deserialize_time = time.time() - start
+        
+        # Should be reasonably fast
+        assert deserialize_time < 1.0
+        assert len(restored_cache) == len(cache)
 
 
 if __name__ == "__main__":

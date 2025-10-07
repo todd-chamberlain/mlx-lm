@@ -178,6 +178,49 @@ MODEL_LOAD_ERRORS = Counter(
     ['model', 'error_type']
 )
 
+# Garbage collection metrics
+GC_COLLECTIONS = Counter(
+    'worker_gc_collections_total',
+    'Total number of garbage collections',
+    ['generation', 'type']  # type: manual or automatic
+)
+
+GC_PAUSE_DURATION = Histogram(
+    'worker_gc_pause_duration_seconds',
+    'Garbage collection pause duration in seconds',
+    ['generation'],
+    buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0]
+)
+
+GC_COLLECTED_OBJECTS = Counter(
+    'worker_gc_collected_objects_total',
+    'Total number of objects collected by GC',
+    ['generation']
+)
+
+GC_UNCOLLECTABLE_OBJECTS = Counter(
+    'worker_gc_uncollectable_objects_total',
+    'Total number of uncollectable objects',
+    ['generation']
+)
+
+GC_ENABLED = Gauge(
+    'worker_gc_enabled',
+    'Whether automatic garbage collection is enabled (1=enabled, 0=disabled)'
+)
+
+GC_THRESHOLD = Gauge(
+    'worker_gc_threshold',
+    'Garbage collection threshold',
+    ['generation']
+)
+
+GC_COUNT = Gauge(
+    'worker_gc_count',
+    'Current garbage collection count',
+    ['generation']
+)
+
 # Application info
 APP_INFO = Info(
     'worker_info',
@@ -296,6 +339,30 @@ class WorkerMetrics:
     def update_active_models_count(self, count: int):
         """Update the count of active models."""
         ACTIVE_MODELS.set(count)
+    
+    def record_gc_event(self, generation: int, collected: int, uncollectable: int,
+                       duration: float, manual: bool):
+        """Record a garbage collection event."""
+        gc_type = "manual" if manual else "automatic"
+        
+        GC_COLLECTIONS.labels(generation=str(generation), type=gc_type).inc()
+        GC_PAUSE_DURATION.labels(generation=str(generation)).observe(duration)
+        GC_COLLECTED_OBJECTS.labels(generation=str(generation)).inc(collected)
+        
+        if uncollectable > 0:
+            GC_UNCOLLECTABLE_OBJECTS.labels(generation=str(generation)).inc(uncollectable)
+    
+    def update_gc_stats(self, enabled: bool, threshold: tuple, counts: tuple):
+        """Update GC status metrics."""
+        GC_ENABLED.set(1 if enabled else 0)
+        
+        # Update threshold for each generation
+        for gen, value in enumerate(threshold):
+            GC_THRESHOLD.labels(generation=str(gen)).set(value)
+        
+        # Update current counts for each generation
+        for gen, value in enumerate(counts):
+            GC_COUNT.labels(generation=str(gen)).set(value)
 
 # Global metrics collector instance (will be initialized with worker_id)
 worker_metrics: Optional[WorkerMetrics] = None
@@ -312,6 +379,14 @@ def get_metrics_data() -> bytes:
         # Update system metrics before generating output
         if worker_metrics:
             worker_metrics.update_system_metrics()
+            
+            # Update GC metrics
+            import gc
+            worker_metrics.update_gc_stats(
+                enabled=gc.isenabled(),
+                threshold=gc.get_threshold(),
+                counts=gc.get_count()
+            )
         
         return generate_latest()
     except Exception as e:

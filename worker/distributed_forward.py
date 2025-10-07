@@ -307,7 +307,8 @@ class DistributedForwardPass:
         
         try:
             logger.info(
-                f"Starting distributed forward pass with cache for request {request_id}"
+                f"Starting distributed forward pass with cache for request {request_id}, "
+                f"input_cache_layers={len(cache) if cache else 0}"
             )
             
             current_activations = input_ids
@@ -317,22 +318,33 @@ class DistributedForwardPass:
             for stage_idx, (node_id, layer_indices) in enumerate(self.pipeline_stages):
                 # Get cache for this stage's layers
                 stage_cache = None
-                if cache is not None:
+                if cache is not None and len(cache) > 0:
+                    # Extract cache entries for this stage's layers
                     stage_cache = [cache[i] for i in layer_indices if i < len(cache)]
                 
                 # Execute stage with cache
                 stub = await self._get_stub(node_id)
                 
-                # Serialize activations and cache
+                # Serialize activations
                 serialized = self.activation_transfer.serialize_activation(
                     current_activations,
                     metadata={
                         'pipeline_id': self.pipeline_id,
                         'request_id': request_id,
                         'stage': node_id,
-                        'has_cache': stage_cache is not None
+                        'has_cache': stage_cache is not None and len(stage_cache) > 0
                     }
                 )
+                
+                # Serialize cache if present
+                cache_data = b''
+                if stage_cache is not None and len(stage_cache) > 0:
+                    cache_data, cache_metrics = self.activation_transfer.serialize_kv_cache(stage_cache)
+                    logger.debug(
+                        f"Serialized cache for stage {stage_idx}: "
+                        f"{len(stage_cache)} layers, "
+                        f"{cache_metrics.compressed_size / 1024:.1f}KB"
+                    )
                 
                 # Create request with cache
                 request = distributed_pb2.ForwardPassRequest(
@@ -344,13 +356,14 @@ class DistributedForwardPass:
                     compression=serialized.compression,
                     shape=serialized.shape,
                     dtype=serialized.dtype,
-                    use_cache=True
+                    use_cache=True,
+                    cache_data=cache_data
                 )
                 
                 # Execute
                 response = await stub.ForwardPass(request, timeout=self.timeout)
                 
-                # Deserialize output and cache
+                # Deserialize output
                 current_activations = self.activation_transfer.deserialize_activation(
                     response.output_data,
                     shape=list(response.shape),
@@ -358,14 +371,23 @@ class DistributedForwardPass:
                     compression=response.compression
                 )
                 
-                # TODO: Deserialize and collect cache updates
-                # For now, cache management is simplified
+                # Deserialize and collect cache updates
+                if response.updated_cache and len(response.updated_cache) > 0:
+                    stage_updated_cache, cache_metrics = self.activation_transfer.deserialize_kv_cache(
+                        response.updated_cache
+                    )
+                    updated_cache.extend(stage_updated_cache)
+                    logger.debug(
+                        f"Received updated cache from stage {stage_idx}: "
+                        f"{len(stage_updated_cache)} layers"
+                    )
             
             self.metrics.total_time = time.time() - forward_start
             
             logger.info(
                 f"Distributed forward pass with cache completed in "
-                f"{self.metrics.total_time:.3f}s"
+                f"{self.metrics.total_time:.3f}s, "
+                f"updated_cache_layers={len(updated_cache)}"
             )
             
             return current_activations, updated_cache
