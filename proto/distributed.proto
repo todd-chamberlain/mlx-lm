@@ -120,6 +120,28 @@ message NodeHealth {
     int64 memory_used_bytes = 4;
 }
 
+// Forward pass request for a single stage
+message ForwardPassRequest {
+    string pipeline_id = 1;
+    string request_id = 2;
+    int32 layer_start = 3;
+    int32 layer_end = 4;  // Exclusive
+    bytes input_data = 5;
+    string compression = 6;
+    repeated int32 shape = 7;
+    string dtype = 8;
+    bool use_cache = 9;
+}
+
+// Forward pass response
+message ForwardPassResponse {
+    bytes output_data = 1;
+    string compression = 2;
+    repeated int32 shape = 3;
+    string dtype = 4;
+    int64 compute_time_ms = 5;
+}
+
 // Distributed inference service
 service DistributedInferenceService {
     // Execute inference on assigned layers
@@ -133,6 +155,9 @@ service DistributedInferenceService {
     
     // Check pipeline health
     rpc CheckPipelineHealth(PipelineHealthRequest) returns (PipelineHealthResponse);
+    
+    // Execute forward pass on assigned layers
+    rpc ForwardPass(ForwardPassRequest) returns (ForwardPassResponse);
 }
 
 message TransferAck {
