@@ -4,7 +4,7 @@
   "description": "Automatically triggers when the Task Implementation Completion hook finishes to select and continue with the next unfinished task from the list",
   "version": "1",
   "when": {
-    "type": "fileEdited",
+    "type": "userTriggered",
     "patterns": [
       "git.next.hook"
     ]
