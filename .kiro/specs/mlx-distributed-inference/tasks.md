@@ -530,9 +530,9 @@
     - _Impact: Low - balanced partitioning works well, this optimizes for heterogeneous setups_
     - _Effort: 2-3 days_
 
-- [ ] 16. Production Validation and Deployment
+- [-] 16. Production Validation and Deployment
 
-  - [ ] 16.1 Deploy to Mac Studio 1
+  - [x] 16.1 Deploy to Mac Studio 1
 
     - Run deployment script on first Mac Studio
     - Verify worker starts and registers with coordinator
