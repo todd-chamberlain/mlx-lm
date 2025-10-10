@@ -319,9 +319,12 @@ class CoordinatorClient:
                     logger.error(f"All streaming attempts failed: {e}")
                     raise RuntimeError(f"Streaming failed after {self.max_retries + 1} attempts: {str(e)}")
     
-    async def get_health(self) -> HealthCheckResponse:
+    async def get_health(self, include_sharded_models: bool = False) -> HealthCheckResponse:
         """
         Get coordinator health status with retry logic.
+        
+        Args:
+            include_sharded_models: Whether to include sharded model health info
         
         Returns:
             Health check response
@@ -331,7 +334,10 @@ class CoordinatorClient:
         """
         async def _do_health_check():
             await self._ensure_connected()
-            request = HealthCheckRequest(include_workers=True)
+            request = HealthCheckRequest(
+                include_workers=True,
+                include_sharded_models=include_sharded_models
+            )
             return await self.stub.HealthCheck(request, timeout=10.0)
         
         return await self._retry_with_backoff(_do_health_check)
@@ -364,3 +370,156 @@ class CoordinatorClient:
         except Exception as e:
             logger.error(f"Failed to get available models: {e}")
             raise RuntimeError(f"Failed to get models: {str(e)}")
+    
+    async def download_model(
+        self, 
+        model_name: str, 
+        enable_sharding: bool = False,
+        force_redownload: bool = False
+    ) -> dict:
+        """
+        Request model download across all workers.
+        
+        Args:
+            model_name: Name of the model to download
+            enable_sharding: Whether to enable automatic sharding
+            force_redownload: Whether to force redownload if model exists
+            
+        Returns:
+            dict with download status and shard plan if sharding is enabled
+        """
+        try:
+            from proto.inference_pb2 import ModelDownloadRequest
+            
+            request = ModelDownloadRequest(
+                model_name=model_name,
+                force_redownload=force_redownload,
+                enable_sharding=enable_sharding
+            )
+            
+            response = await self.stub.DownloadModel(request, timeout=10.0)
+            
+            result = {
+                'success': response.success,
+                'message': response.message,
+                'download_id': response.download_id,
+                'workers_notified': response.workers_notified,
+                'is_sharded': response.is_sharded
+            }
+            
+            # Add shard plan if sharding is enabled
+            if response.is_sharded and response.HasField('shard_plan'):
+                shard_plan = response.shard_plan
+                result['shard_plan'] = {
+                    'model_name': shard_plan.model_name,
+                    'total_layers': shard_plan.total_layers,
+                    'assignments': [
+                        {
+                            'worker_id': assignment.worker_id,
+                            'start_layer': assignment.start_layer,
+                            'end_layer': assignment.end_layer,
+                            'next_worker_id': assignment.next_worker_id if assignment.next_worker_id else None
+                        }
+                        for assignment in shard_plan.assignments
+                    ]
+                }
+            
+            return result
+            
+        except grpc.RpcError as e:
+            logger.error(f"gRPC error downloading model: {e.code()} - {e.details()}")
+            raise RuntimeError(f"Failed to download model: {e.details()}")
+        except Exception as e:
+            logger.error(f"Error downloading model: {e}")
+            raise
+    
+    async def get_download_status(self, model_name: str, download_id: Optional[str] = None) -> dict:
+        """
+        Get model download status from all workers.
+        
+        Args:
+            model_name: Name of the model
+            download_id: Optional download ID
+            
+        Returns:
+            dict with download status
+        """
+        try:
+            from proto.inference_pb2 import ModelStatusRequest
+            
+            request = ModelStatusRequest(
+                model_name=model_name,
+                download_id=download_id or ""
+            )
+            
+            response = await self.stub.GetDownloadStatus(request, timeout=10.0)
+            
+            worker_statuses = [
+                {
+                    'worker_id': ws.worker_id,
+                    'status': ws.status,
+                    'progress_percent': ws.progress_percent,
+                    'error': ws.error
+                }
+                for ws in response.worker_status
+            ]
+            
+            return {
+                'model_name': response.model_name,
+                'status': response.status,
+                'progress_percent': response.progress_percent,
+                'size_bytes': response.size_bytes,
+                'worker_status': worker_statuses
+            }
+            
+        except grpc.RpcError as e:
+            logger.error(f"gRPC error getting download status: {e.code()} - {e.details()}")
+            raise RuntimeError(f"Failed to get download status: {e.details()}")
+        except Exception as e:
+            logger.error(f"Error getting download status: {e}")
+            raise
+    
+    async def get_shard_status(self, model_name: str) -> dict:
+        """
+        Get shard status for a sharded model.
+        
+        Args:
+            model_name: Name of the model
+            
+        Returns:
+            dict with shard status information
+        """
+        try:
+            from proto.inference_pb2 import ShardStatusRequest
+            
+            request = ShardStatusRequest(model_name=model_name)
+            response = await self.stub.GetShardStatus(request, timeout=10.0)
+            
+            shard_assignments = [
+                {
+                    'worker_id': shard.worker_id,
+                    'start_layer': shard.start_layer,
+                    'end_layer': shard.end_layer,
+                    'status': shard.status,
+                    'progress_percent': shard.progress_percent,
+                    'error': shard.error if shard.error else None
+                }
+                for shard in response.shard_assignments
+            ]
+            
+            return {
+                'model_name': response.model_name,
+                'is_sharded': response.is_sharded,
+                'total_layers': response.total_layers,
+                'shard_assignments': shard_assignments,
+                'overall_status': response.overall_status,
+                'inference_count': response.inference_count if response.inference_count > 0 else None,
+                'avg_latency_ms': response.avg_latency_ms if response.avg_latency_ms > 0 else None
+            }
+            
+        except grpc.RpcError as e:
+            logger.error(f"gRPC error getting shard status: {e.code()} - {e.details()}")
+            raise RuntimeError(f"Failed to get shard status: {e.details()}")
+        except Exception as e:
+            logger.error(f"Error getting shard status: {e}")
+            raise

@@ -301,9 +301,8 @@ class PipelineManager:
                 logger.error(f"Node {node_id} is not healthy: {node_info.status}")
                 return False
             
-            # TODO: Verify node has loaded assigned layers
-            # This would require adding a gRPC call to query node state
-            
+            # Note: Layer verification happens during model download via DownloadModel RPC
+            # Workers report success/failure when loading their assigned layers
             logger.debug(f"Node {node_id} verified: layers {assignment.start_layer}-{assignment.end_layer}")
         
         logger.info("Pipeline verification complete - all nodes ready")
@@ -329,15 +328,14 @@ class PipelineManager:
             # Mark as shutting down
             self.pipelines[pipeline_id] = PipelineState.SHUTDOWN
             
-            # Remove from coordinator
-            # TODO: Add coordinator method to remove pipeline
-            
             # Cleanup local state
             if pipeline_id in self.pipeline_configs:
                 del self.pipeline_configs[pipeline_id]
             
             if pipeline_id in self.pipeline_assignments:
                 del self.pipeline_assignments[pipeline_id]
+            
+            # Pipeline removal from coordinator happens via model deletion
             
             del self.pipelines[pipeline_id]
             

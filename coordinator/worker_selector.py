@@ -302,7 +302,12 @@ class WorkerFilter:
     @staticmethod
     def filter_by_model(workers: List[WorkerInfo], model: str) -> List[WorkerInfo]:
         """Filter workers that support a specific model."""
-        return [w for w in workers if model in w.supported_models]
+        logger.info(f"[FILTER] Filtering {len(workers)} workers for model '{model}'")
+        for w in workers:
+            logger.info(f"[FILTER] Worker {w.worker_id} supports: {w.supported_models}")
+        filtered = [w for w in workers if model in w.supported_models]
+        logger.info(f"[FILTER] {len(filtered)} workers support model '{model}'")
+        return filtered
     
     @staticmethod
     def filter_by_capacity(workers: List[WorkerInfo], min_capacity: int = 1) -> List[WorkerInfo]:

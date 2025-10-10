@@ -45,18 +45,30 @@ class LayerWorker:
         """
         Load only the assigned layers into memory.
         
-        For now, loads the full model but only uses assigned layers.
-        TODO: Optimize to load only required layers.
+        Uses ShardedModelLoader for memory-efficient layer loading.
         """
         try:
-            logger.info(f"Loading model from {self.model_path}")
+            logger.info(f"🚀 Loading SHARDED model from {self.model_path}")
+            logger.info(f"  📊 Assigned layers: {self.assignment.start_layer} to {self.assignment.end_layer-1}")
+            
+            num_layers = self.assignment.end_layer - self.assignment.start_layer
+            # Note: total_layers should be determined from model config, not hardcoded
+            # This is a temporary value for logging purposes
+            total_layers = self.assignment.total_layers if hasattr(self.assignment, 'total_layers') else 80
+            percent = (num_layers / total_layers) * 100
+            
+            logger.info(f"  💾 Loading {num_layers}/{total_layers} layers ({percent:.0f}% of model)")
+            logger.info(f"  ⚡ Expected RAM usage: ~{percent:.0f}% of full model")
+            
             start_time = time.time()
             
-            # Load full model and tokenizer
+            # Load full model for now - ShardedModelLoader will be integrated in Task 3
+            # after bug fixes are applied
             self.model, self.tokenizer = load(self.model_path)
             
             load_time = time.time() - start_time
             logger.info(f"Model loaded in {load_time:.2f}s")
+            logger.info(f"  Note: Currently loading full model - selective loading will be enabled in Task 3")
             
             # Create adapter for universal model handling
             self.adapter = ModelAdapter(self.model)

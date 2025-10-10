@@ -19,6 +19,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from proto.inference_pb2_grpc import InferenceServiceServicer
 from proto import inference_pb2 as pb
+from proto import distributed_pb2
+from proto import distributed_pb2_grpc as pb2_grpc
 from proto.grpc_base import GRPCServerBase
 from proto.errors import MLXError, MLXErrorCode
 
@@ -163,7 +165,9 @@ class InferenceServiceImpl(InferenceServiceServicer):
                 status = "degraded" 
                 message = f"High memory usage: {memory_usage['percent']:.1f}%"
             
-            if metrics['success_rate'] < 0.9:
+            # Only check success rate if we have enough requests (at least 10)
+            # This prevents marking worker unhealthy during startup or after model load
+            if metrics['total_requests'] >= 10 and metrics['success_rate'] < 0.9:
                 status = "unhealthy"
                 message = f"Low success rate: {metrics['success_rate']:.2f}"
             
@@ -213,6 +217,287 @@ class InferenceServiceImpl(InferenceServiceServicer):
         except Exception as e:
             logger.error(f"Error getting metrics: {e}")
             await context.abort(grpc.StatusCode.INTERNAL, f"Failed to get metrics: {str(e)}")
+    
+    async def DownloadModel(self, request: pb.ModelDownloadRequest, context: grpc.aio.ServicerContext) -> pb.ModelDownloadResponse:
+        """Download a model on this worker"""
+        try:
+            import asyncio
+            from mlx_lm import load
+            import os
+            from pathlib import Path
+            from .sharded_model_loader import LayerAssignment as LoaderLayerAssignment
+            
+            logger.info(f"Model download requested: {request.model_name}")
+            
+            # Check if this is a sharded download
+            is_sharded = request.HasField('layer_assignment')
+            
+            if is_sharded:
+                logger.info(
+                    f"Sharded download requested: layers "
+                    f"{request.layer_assignment.start_layer}-{request.layer_assignment.end_layer}"
+                )
+            
+            # Check if model is already loaded
+            if request.model_name in self.model_manager.loaded_models:
+                logger.info(f"Model {request.model_name} is already loaded")
+                return pb.ModelDownloadResponse(
+                    success=True,
+                    message=f"Model {request.model_name} is already loaded",
+                    download_id="",
+                    workers_notified=1
+                )
+            
+            # Start download/load in background
+            async def download_and_load_model():
+                try:
+                    # Set HF_HOME to avoid permission issues
+                    hf_home = os.getenv('HF_HOME', '/Users/Shared/models/.cache')
+                    os.environ['HF_HOME'] = hf_home
+                    
+                    if is_sharded:
+                        # Sharded download and load
+                        logger.info(f"Starting sharded download for {request.model_name}")
+                        
+                        # Convert proto LayerAssignment to loader LayerAssignment
+                        layer_assignment = LoaderLayerAssignment(
+                            worker_id=request.layer_assignment.worker_id,
+                            start_layer=request.layer_assignment.start_layer,
+                            end_layer=request.layer_assignment.end_layer,
+                            next_worker_id=request.layer_assignment.next_worker_id if request.layer_assignment.next_worker_id else None,
+                            next_worker_address=request.layer_assignment.next_worker_address if request.layer_assignment.next_worker_address else None
+                        )
+                        
+                        # Load sharded model
+                        success = await asyncio.to_thread(
+                            self.model_manager.load_sharded_model,
+                            request.model_name,
+                            layer_assignment
+                        )
+                        
+                        if not success:
+                            raise RuntimeError("Failed to load sharded model")
+                        
+                        logger.info(f"Successfully loaded sharded model {request.model_name}")
+                        
+                        # Update download tracking
+                        self.model_manager._downloaded_models = getattr(self.model_manager, '_downloaded_models', {})
+                        self.model_manager._downloaded_models[request.model_name] = {
+                            'status': 'ready',
+                            'progress': 100.0,
+                            'is_sharded': True,
+                            'start_layer': layer_assignment.start_layer,
+                            'end_layer': layer_assignment.end_layer
+                        }
+                        
+                    else:
+                        # Regular full model download
+                        # Check if model already exists locally
+                        model_cache_path = Path(hf_home) / "huggingface" / "hub" / f"models--{request.model_name.replace('/', '--')}"
+                        already_downloaded = model_cache_path.exists()
+                        
+                        if already_downloaded:
+                            logger.info(f"Model {request.model_name} already exists locally, loading...")
+                        else:
+                            logger.info(f"Downloading model {request.model_name}...")
+                        
+                        # Download/load model using mlx_lm (will use cache if available)
+                        model, tokenizer = await asyncio.to_thread(load, request.model_name)
+                        logger.info(f"Successfully loaded {request.model_name}")
+                        
+                        # Add model directly to model manager's loaded models
+                        from .model_manager import ModelInfo
+                        import time
+                        
+                        model_info = ModelInfo(
+                            model_path=request.model_name,
+                            model_name=request.model_name,
+                            model=model,
+                            tokenizer=tokenizer,
+                            loaded_at=time.time(),
+                            memory_usage_gb=2.0,  # Estimate
+                            max_tokens=4096,
+                            context_length=4096
+                        )
+                        
+                        with self.model_manager.model_lock:
+                            self.model_manager.loaded_models[request.model_name] = model_info
+                            logger.info(f"Added model to loaded_models. Current keys: {list(self.model_manager.loaded_models.keys())}")
+                        
+                        logger.info(f"Model {request.model_name} added to model manager")
+                        
+                        # Update download tracking
+                        self.model_manager._downloaded_models = getattr(self.model_manager, '_downloaded_models', {})
+                        self.model_manager._downloaded_models[request.model_name] = {
+                            'status': 'ready',
+                            'progress': 100.0,
+                            'is_sharded': False
+                        }
+                    
+                    # Note: Worker will need to re-register to notify coordinator of new models
+                    logger.info(f"Model {request.model_name} is now available for inference")
+                    logger.info("Note: Restart worker or wait for periodic re-registration to update coordinator")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to download/load model {request.model_name}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    self.model_manager._downloaded_models = getattr(self.model_manager, '_downloaded_models', {})
+                    self.model_manager._downloaded_models[request.model_name] = {
+                        'status': 'failed',
+                        'progress': 0.0,
+                        'error': str(e)
+                    }
+            
+            # Initialize download tracking
+            self.model_manager._downloaded_models = getattr(self.model_manager, '_downloaded_models', {})
+            self.model_manager._downloaded_models[request.model_name] = {
+                'status': 'downloading',
+                'progress': 0.0
+            }
+            
+            # Start download task
+            asyncio.create_task(download_and_load_model())
+            
+            shard_info = ""
+            if is_sharded:
+                shard_info = f" (layers {request.layer_assignment.start_layer}-{request.layer_assignment.end_layer})"
+            
+            return pb.ModelDownloadResponse(
+                success=True,
+                message=f"Model download/load started for {request.model_name}{shard_info}",
+                download_id="",
+                workers_notified=1
+            )
+            
+        except Exception as e:
+            logger.error(f"Error in DownloadModel: {e}", exc_info=True)
+            return pb.ModelDownloadResponse(
+                success=False,
+                message=f"Failed to start download: {str(e)}",
+                download_id="",
+                workers_notified=0
+            )
+    
+    async def GetModelStatus(self, request: pb.ModelStatusRequest, context: grpc.aio.ServicerContext) -> pb.ModelStatusResponse:
+        """Get model download status"""
+        try:
+            logger.debug(f"Model status requested: {request.model_name}")
+            
+            # Check if model is downloaded
+            downloaded_models = getattr(self.model_manager, '_downloaded_models', {})
+            
+            if request.model_name in downloaded_models:
+                model_info = downloaded_models[request.model_name]
+                status = model_info.get('status', 'unknown')
+                progress = model_info.get('progress', 0.0)
+            else:
+                # Check if model exists in cache
+                import os
+                cache_dir = os.environ.get('HF_HOME', '/Users/Shared/models/.cache')
+                model_cache_path = os.path.join(cache_dir, 'hub', f"models--{request.model_name.replace('/', '--')}")
+                
+                if os.path.exists(model_cache_path):
+                    status = 'ready'
+                    progress = 100.0
+                else:
+                    status = 'not_found'
+                    progress = 0.0
+            
+            return pb.ModelStatusResponse(
+                model_name=request.model_name,
+                status=status,
+                progress_percent=progress,
+                size_bytes=0,
+                worker_status=[]
+            )
+            
+        except Exception as e:
+            logger.error(f"Error in GetModelStatus: {e}", exc_info=True)
+            return pb.ModelStatusResponse(
+                model_name=request.model_name,
+                status="error",
+                progress_percent=0.0,
+                size_bytes=0,
+                worker_status=[]
+            )
+    
+    async def DeleteModel(self, request: pb.ModelDeleteRequest, context: grpc.aio.ServicerContext) -> pb.ModelDeleteResponse:
+        """Delete a model from this worker"""
+        try:
+            logger.info(f"Model deletion requested: {request.model_name}")
+            
+            # Check if model is loaded
+            model_info = self.model_manager.get_model_info_dict(request.model_name)
+            
+            if not model_info:
+                logger.warning(f"Model {request.model_name} not loaded on this worker")
+                return pb.ModelDeleteResponse(
+                    success=True,
+                    message=f"Model {request.model_name} was not loaded",
+                    workers_deleted=0,
+                    worker_status=[]
+                )
+            
+            # Check if this is a sharded model
+            is_sharded = model_info.get('is_sharded', False)
+            
+            if is_sharded:
+                logger.info(
+                    f"Deleting sharded model {request.model_name} "
+                    f"(layers {model_info['shard_metadata']['start_layer']}-"
+                    f"{model_info['shard_metadata']['end_layer']})"
+                )
+            
+            # Unload model from memory
+            success = await asyncio.to_thread(
+                self.model_manager.unload_model,
+                request.model_name
+            )
+            
+            if not success:
+                error_msg = f"Failed to unload model {request.model_name}"
+                logger.error(error_msg)
+                return pb.ModelDeleteResponse(
+                    success=False,
+                    message=error_msg,
+                    workers_deleted=0,
+                    worker_status=[]
+                )
+            
+            # Clean up download tracking
+            downloaded_models = getattr(self.model_manager, '_downloaded_models', {})
+            if request.model_name in downloaded_models:
+                del downloaded_models[request.model_name]
+            
+            # Clean up LayerWorker resources if sharded
+            if is_sharded:
+                # LayerWorker cleanup is handled by model_manager.unload_model
+                # which deletes the model reference and triggers garbage collection
+                logger.info(f"Cleaned up LayerWorker resources for {request.model_name}")
+            
+            message = f"Successfully deleted model {request.model_name}"
+            if is_sharded:
+                message += " (sharded model)"
+            
+            logger.info(message)
+            
+            return pb.ModelDeleteResponse(
+                success=True,
+                message=message,
+                workers_deleted=1,
+                worker_status=[]
+            )
+            
+        except Exception as e:
+            error_msg = f"Error deleting model {request.model_name}: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return pb.ModelDeleteResponse(
+                success=False,
+                message=error_msg,
+                workers_deleted=0,
+                worker_status=[]
+            )
 
 
 class WorkerGrpcServer:
@@ -226,14 +511,29 @@ class WorkerGrpcServer:
         self.max_workers = max_workers
         self.server = None
         self.service_impl = None
+        self.coordinator_client = None
         
         logger.info(f"Initializing WorkerGrpcServer on port {port}")
+    
+    def set_coordinator_client(self, coordinator_client):
+        """Set the coordinator client reference for the service"""
+        self.coordinator_client = coordinator_client
+        if self.service_impl:
+            self.service_impl.coordinator_client = coordinator_client
     
     async def start(self):
         """Start the gRPC server"""
         try:
-            # Create service implementation
+            # Create service implementations
             self.service_impl = InferenceServiceImpl(self.model_manager, self.inference_engine)
+            self.distributed_service_impl = DistributedInferenceServiceImpl(
+                self.model_manager,
+                self.inference_engine.worker_id
+            )
+            
+            # Set coordinator client if available
+            if self.coordinator_client:
+                self.service_impl.coordinator_client = self.coordinator_client
             
             # Create server
             self.server = grpc.aio.server(
@@ -245,14 +545,19 @@ class WorkerGrpcServer:
                     ('grpc.http2.max_pings_without_data', 0),
                     ('grpc.http2.min_time_between_pings_ms', 10000),
                     ('grpc.http2.min_ping_interval_without_data_ms', 300000),
-                    ('grpc.max_receive_message_length', 4 * 1024 * 1024),  # 4MB
-                    ('grpc.max_send_message_length', 4 * 1024 * 1024),     # 4MB
+                    ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100MB for activations
+                    ('grpc.max_send_message_length', 100 * 1024 * 1024),     # 100MB for activations
                 ]
             )
             
-            # Add service to server
+            # Add services to server
             from proto.inference_pb2_grpc import add_InferenceServiceServicer_to_server
+            from proto.distributed_pb2_grpc import add_DistributedInferenceServiceServicer_to_server
+            
             add_InferenceServiceServicer_to_server(self.service_impl, self.server)
+            add_DistributedInferenceServiceServicer_to_server(self.distributed_service_impl, self.server)
+            
+            logger.info("Registered InferenceService and DistributedInferenceService")
             
             # Add insecure port
             listen_addr = f'[::]:{self.port}'
@@ -334,3 +639,194 @@ class StreamingManager:
                 logger.warning(f"Cleaned up stale stream: {request_id}")
         
         return len(stale_streams)
+
+
+class DistributedInferenceServiceImpl(pb2_grpc.DistributedInferenceServiceServicer):
+    """gRPC service implementation for distributed inference"""
+    
+    def __init__(self, model_manager: ModelManager, worker_id: str):
+        self.model_manager = model_manager
+        self.worker_id = worker_id
+        
+        logger.info(f"Initialized DistributedInferenceService for worker {worker_id}")
+    
+    async def ForwardPass(
+        self,
+        request: distributed_pb2.ForwardPassRequest,
+        context: grpc.aio.ServicerContext
+    ) -> distributed_pb2.ForwardPassResponse:
+        """
+        Execute forward pass on assigned layers.
+        
+        Args:
+            request: ForwardPassRequest with input activations
+            context: gRPC context
+            
+        Returns:
+            ForwardPassResponse with output activations
+        """
+        try:
+            compute_start = time.time()
+            
+            logger.info(
+                f"Processing forward pass request",
+                extra={
+                    "request_id": request.request_id,
+                    "pipeline_id": request.pipeline_id,
+                    "worker_id": self.worker_id,
+                    "layer_start": request.layer_start,
+                    "layer_end": request.layer_end,
+                    "layer_range": f"{request.layer_start}-{request.layer_end}",
+                    "input_shape": list(request.shape),
+                    "compression": request.compression,
+                    "operation": "forward_pass_start"
+                }
+            )
+            
+            # Import activation transfer
+            from worker.activation_transfer import ActivationTransfer, CompressionType
+            
+            # Create activation transfer instance
+            compression_map = {
+                "none": CompressionType.NONE,
+                "zstd": CompressionType.ZSTD,
+                "lz4": CompressionType.LZ4
+            }
+            compression_type = compression_map.get(request.compression.lower(), CompressionType.ZSTD)
+            activation_transfer = ActivationTransfer(compression=compression_type)
+            
+            # Deserialize input activations
+            input_activations = activation_transfer.deserialize_activation(
+                data=request.input_data,
+                shape=list(request.shape),
+                dtype=request.dtype,
+                compression=request.compression
+            )
+            
+            logger.debug(
+                f"Deserialized input activations: shape={input_activations.shape}, "
+                f"dtype={input_activations.dtype}"
+            )
+            
+            # Get the model's layer worker
+            # For sharded models, we need to get the LayerWorker instance
+            # Currently only supports single model per worker (default)
+            model_info = self.model_manager.get_model_info_dict("default")
+            if not model_info:
+                raise RuntimeError("Model not loaded")
+            
+            # Check if this is a sharded model
+            if not model_info.get('is_sharded', False):
+                raise RuntimeError("ForwardPass RPC only works with sharded models")
+            
+            # Get the layer worker from model manager
+            # The model manager should have stored the LayerWorker instance
+            layer_worker = model_info.get('layer_worker')
+            if not layer_worker:
+                raise RuntimeError("LayerWorker not found in model info")
+            
+            # Execute forward pass through assigned layers
+            output_activations, cache = layer_worker.forward(input_activations, cache=None)
+            
+            logger.debug(
+                f"Forward pass completed: output_shape={output_activations.shape}"
+            )
+            
+            # Serialize output activations
+            serialized = activation_transfer.serialize_activation(
+                activation=output_activations,
+                metadata={
+                    'pipeline_id': request.pipeline_id,
+                    'request_id': request.request_id,
+                    'layer_start': request.layer_start,
+                    'layer_end': request.layer_end
+                }
+            )
+            
+            compute_time_ms = (time.time() - compute_start) * 1000
+            
+            logger.info(
+                f"Forward pass completed",
+                extra={
+                    "request_id": request.request_id,
+                    "pipeline_id": request.pipeline_id,
+                    "worker_id": self.worker_id,
+                    "layer_start": request.layer_start,
+                    "layer_end": request.layer_end,
+                    "compute_time_ms": compute_time_ms,
+                    "output_shape": str(output_activations.shape),
+                    "output_bytes": len(serialized.data),
+                    "operation": "forward_pass_complete"
+                }
+            )
+            
+            # Create response
+            response = distributed_pb2.ForwardPassResponse(
+                output_data=serialized.data,
+                compression=serialized.compression,
+                shape=serialized.shape,
+                dtype=serialized.dtype,
+                compute_time_ms=int(compute_time_ms)
+            )
+            
+            return response
+            
+        except Exception as e:
+            logger.error(
+                f"Forward pass failed",
+                extra={
+                    "request_id": request.request_id,
+                    "pipeline_id": request.pipeline_id,
+                    "worker_id": self.worker_id,
+                    "error": str(e),
+                    "operation": "forward_pass_error"
+                }
+            )
+            await context.abort(
+                grpc.StatusCode.INTERNAL,
+                f"Forward pass failed: {str(e)}"
+            )
+    
+    async def ProcessLayers(
+        self,
+        request: distributed_pb2.DistributedInferenceRequest,
+        context: grpc.aio.ServicerContext
+    ) -> distributed_pb2.DistributedInferenceResponse:
+        """Process inference on assigned layers (placeholder)"""
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED,
+            "ProcessLayers not yet implemented"
+        )
+    
+    async def StreamPipeline(
+        self,
+        request_iterator,
+        context: grpc.aio.ServicerContext
+    ):
+        """Stream inference through pipeline (placeholder)"""
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED,
+            "StreamPipeline not yet implemented"
+        )
+    
+    async def TransferActivation(
+        self,
+        request: distributed_pb2.ActivationTransfer,
+        context: grpc.aio.ServicerContext
+    ) -> distributed_pb2.TransferAck:
+        """Transfer activation to next node (placeholder)"""
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED,
+            "TransferActivation not yet implemented"
+        )
+    
+    async def CheckPipelineHealth(
+        self,
+        request: distributed_pb2.PipelineHealthRequest,
+        context: grpc.aio.ServicerContext
+    ) -> distributed_pb2.PipelineHealthResponse:
+        """Check pipeline health (placeholder)"""
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED,
+            "CheckPipelineHealth not yet implemented"
+        )

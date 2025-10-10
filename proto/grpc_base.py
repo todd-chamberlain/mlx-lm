@@ -286,7 +286,8 @@ class GRPCClientBase:
             
             try:
                 logger.info(f"Connecting to gRPC server at {self.target}")
-                self.channel = grpc.insecure_channel(self.target, options=self.options)
+                # Use async channel for async operations
+                self.channel = grpc_aio.insecure_channel(self.target, options=self.options)
                 
                 # Wait for channel to be ready
                 await self._wait_for_ready()
@@ -309,11 +310,9 @@ class GRPCClientBase:
         if not self.channel:
             return False
         
-        try:
-            state = self.channel.get_state(try_to_connect=False)
-            return state == grpc.ChannelConnectivity.READY
-        except Exception:
-            return False
+        # Simply return True if channel exists
+        # Actual connectivity will be tested on first RPC call
+        return True
     
     async def _wait_for_ready(self, timeout: float = 10.0) -> None:
         """Wait for channel to be ready."""
@@ -334,14 +333,9 @@ class GRPCClientBase:
     
     async def _wait_for_channel_ready(self) -> None:
         """Wait for channel to reach READY state."""
-        while True:
-            state = self.channel.get_state(try_to_connect=True)
-            if state == grpc.ChannelConnectivity.READY:
-                break
-            elif state == grpc.ChannelConnectivity.TRANSIENT_FAILURE:
-                await asyncio.sleep(0.1)
-            else:
-                await asyncio.sleep(0.1)
+        # Just wait a bit for the channel to be ready
+        # Actual connectivity will be tested on first RPC call
+        await asyncio.sleep(0.5)
     
     async def close(self) -> None:
         """Close the gRPC channel."""

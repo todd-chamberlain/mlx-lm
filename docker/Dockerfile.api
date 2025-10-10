@@ -28,8 +28,8 @@ COPY api/requirements.txt ./api-requirements.txt
 
 # Install Python dependencies
 RUN pip install --upgrade pip setuptools wheel
-RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir -r api-requirements.txt
+RUN pip install --no-cache-dir -r /build/requirements.txt
+RUN pip install --no-cache-dir -r /build/api-requirements.txt
 
 # Stage 2: Runtime image
 FROM python:3.11-slim as runtime

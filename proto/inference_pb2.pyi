@@ -99,14 +99,16 @@ class DeviceInfo(_message.Message):
     def __init__(self, model: _Optional[str] = ..., memory_gb: _Optional[int] = ..., gpu_cores: _Optional[int] = ..., os_version: _Optional[str] = ..., mlx_version: _Optional[str] = ...) -> None: ...
 
 class HeartbeatRequest(_message.Message):
-    __slots__ = ("worker_id", "status", "metrics")
+    __slots__ = ("worker_id", "status", "metrics", "supported_models")
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
     METRICS_FIELD_NUMBER: _ClassVar[int]
+    SUPPORTED_MODELS_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
     status: WorkerStatus
     metrics: WorkerMetrics
-    def __init__(self, worker_id: _Optional[str] = ..., status: _Optional[_Union[WorkerStatus, _Mapping]] = ..., metrics: _Optional[_Union[WorkerMetrics, _Mapping]] = ...) -> None: ...
+    supported_models: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, worker_id: _Optional[str] = ..., status: _Optional[_Union[WorkerStatus, _Mapping]] = ..., metrics: _Optional[_Union[WorkerMetrics, _Mapping]] = ..., supported_models: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class HeartbeatResponse(_message.Message):
     __slots__ = ("acknowledged", "message", "heartbeat_interval")
@@ -187,6 +189,60 @@ class HealthStatus(_message.Message):
     message: str
     metrics: WorkerMetrics
     def __init__(self, status: _Optional[str] = ..., message: _Optional[str] = ..., metrics: _Optional[_Union[WorkerMetrics, _Mapping]] = ...) -> None: ...
+
+class ModelDownloadRequest(_message.Message):
+    __slots__ = ("model_name", "force_redownload")
+    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
+    FORCE_REDOWNLOAD_FIELD_NUMBER: _ClassVar[int]
+    model_name: str
+    force_redownload: bool
+    def __init__(self, model_name: _Optional[str] = ..., force_redownload: bool = ...) -> None: ...
+
+class ModelDownloadResponse(_message.Message):
+    __slots__ = ("success", "message", "download_id", "workers_notified")
+    SUCCESS_FIELD_NUMBER: _ClassVar[int]
+    MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    DOWNLOAD_ID_FIELD_NUMBER: _ClassVar[int]
+    WORKERS_NOTIFIED_FIELD_NUMBER: _ClassVar[int]
+    success: bool
+    message: str
+    download_id: str
+    workers_notified: int
+    def __init__(self, success: bool = ..., message: _Optional[str] = ..., download_id: _Optional[str] = ..., workers_notified: _Optional[int] = ...) -> None: ...
+
+class ModelStatusRequest(_message.Message):
+    __slots__ = ("model_name", "download_id")
+    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
+    DOWNLOAD_ID_FIELD_NUMBER: _ClassVar[int]
+    model_name: str
+    download_id: str
+    def __init__(self, model_name: _Optional[str] = ..., download_id: _Optional[str] = ...) -> None: ...
+
+class ModelStatusResponse(_message.Message):
+    __slots__ = ("model_name", "status", "progress_percent", "size_bytes", "worker_status")
+    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    PROGRESS_PERCENT_FIELD_NUMBER: _ClassVar[int]
+    SIZE_BYTES_FIELD_NUMBER: _ClassVar[int]
+    WORKER_STATUS_FIELD_NUMBER: _ClassVar[int]
+    model_name: str
+    status: str
+    progress_percent: float
+    size_bytes: int
+    worker_status: _containers.RepeatedCompositeFieldContainer[WorkerModelStatus]
+    def __init__(self, model_name: _Optional[str] = ..., status: _Optional[str] = ..., progress_percent: _Optional[float] = ..., size_bytes: _Optional[int] = ..., worker_status: _Optional[_Iterable[_Union[WorkerModelStatus, _Mapping]]] = ...) -> None: ...
+
+class WorkerModelStatus(_message.Message):
+    __slots__ = ("worker_id", "status", "progress_percent", "error")
+    WORKER_ID_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    PROGRESS_PERCENT_FIELD_NUMBER: _ClassVar[int]
+    ERROR_FIELD_NUMBER: _ClassVar[int]
+    worker_id: str
+    status: str
+    progress_percent: float
+    error: str
+    def __init__(self, worker_id: _Optional[str] = ..., status: _Optional[str] = ..., progress_percent: _Optional[float] = ..., error: _Optional[str] = ...) -> None: ...
 
 class Empty(_message.Message):
     __slots__ = ()

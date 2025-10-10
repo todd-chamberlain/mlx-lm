@@ -1,5 +1,11 @@
 # Shared dependencies for MLX Distributed Inference Server
 
+# MLX and ML dependencies
+mlx>=0.0.9
+mlx-lm>=0.0.9
+transformers>=4.36.0
+huggingface-hub>=0.20.0
+
 # gRPC and Protocol Buffers
 grpcio>=1.60.0
 grpcio-tools>=1.60.0

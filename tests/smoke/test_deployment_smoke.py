@@ -14,9 +14,9 @@ from typing import Dict, Any
 class TestAPIServerSmoke:
     """Smoke tests for API server deployment."""
     
-    def setup_method(self):
+    def setup_method(self, request):
         """Set up test fixtures."""
-        self.base_url = pytest.config.getoption("--base-url", "http://localhost:8000")
+        self.base_url = request.config.getoption("--base-url", "http://localhost:8000")
         self.timeout = 10
     
     def test_health_endpoint(self):
@@ -78,9 +78,9 @@ class TestAPIServerSmoke:
 class TestCoordinatorSmoke:
     """Smoke tests for coordinator service."""
     
-    def setup_method(self):
+    def setup_method(self, request):
         """Set up test fixtures."""
-        self.coordinator_url = pytest.config.getoption(
+        self.coordinator_url = request.config.getoption(
             "--coordinator-url",
             "http://localhost:50051"
         )
@@ -102,9 +102,9 @@ class TestCoordinatorSmoke:
 class TestSystemSmoke:
     """System-level smoke tests."""
     
-    def setup_method(self):
+    def setup_method(self, request):
         """Set up test fixtures."""
-        self.base_url = pytest.config.getoption("--base-url", "http://localhost:8000")
+        self.base_url = request.config.getoption("--base-url", "http://localhost:8000")
     
     def test_end_to_end_latency(self):
         """Test end-to-end request latency is acceptable."""

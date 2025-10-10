@@ -5,7 +5,7 @@ Coordinator Service Configuration Classes
 from typing import Dict, Optional
 from enum import Enum
 from pydantic import Field, validator
-from .base import BaseConfig, NetworkConfig
+from .base import BaseConfig, NetworkConfig, ShardingConfig
 
 
 class LoadBalancingAlgorithm(str, Enum):
@@ -213,6 +213,7 @@ class CoordinatorConfig(BaseConfig):
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
     health: HealthConfig = Field(default_factory=HealthConfig)
     discovery: DiscoveryConfig = Field(default_factory=DiscoveryConfig)
+    sharding: ShardingConfig = Field(default_factory=ShardingConfig)
     
     @classmethod
     def from_yaml(cls, config_path: str) -> "CoordinatorConfig":

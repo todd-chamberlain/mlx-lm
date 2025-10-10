@@ -111,6 +111,31 @@ CIRCUIT_BREAKER_FAILURES = Counter(
     ['worker_id']
 )
 
+# Sharding metrics
+SHARDED_MODELS_TOTAL = Gauge(
+    'coordinator_sharded_models_total',
+    'Total number of sharded models'
+)
+
+SHARDED_INFERENCE_REQUESTS = Counter(
+    'coordinator_sharded_inference_requests_total',
+    'Total number of inference requests for sharded models',
+    ['model', 'status']
+)
+
+SHARDED_INFERENCE_LATENCY = Histogram(
+    'coordinator_sharded_inference_latency_seconds',
+    'End-to-end latency for sharded model inference',
+    ['model'],
+    buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0]
+)
+
+SHARD_DOWNLOAD_STATUS = Gauge(
+    'coordinator_shard_download_status',
+    'Download status per worker shard (0=not_started, 1=downloading, 2=complete, 3=failed)',
+    ['model', 'worker_id', 'layer_range']
+)
+
 # Application info
 APP_INFO = Info(
     'coordinator_info',
@@ -177,6 +202,32 @@ class CoordinatorMetrics:
     def update_active_workers_count(self, count: int):
         """Update the count of active workers."""
         ACTIVE_WORKERS.set(count)
+    
+    def update_sharded_models_count(self, count: int):
+        """Update the count of sharded models."""
+        SHARDED_MODELS_TOTAL.set(count)
+    
+    def record_sharded_inference_request(self, model: str, status: str, duration: float):
+        """Record sharded inference request metrics."""
+        SHARDED_INFERENCE_REQUESTS.labels(model=model, status=status).inc()
+        SHARDED_INFERENCE_LATENCY.labels(model=model).observe(duration)
+    
+    def update_shard_download_status(self, model: str, worker_id: str, 
+                                    layer_range: str, status: int):
+        """
+        Update shard download status for a worker.
+        
+        Args:
+            model: Model name
+            worker_id: Worker identifier
+            layer_range: Layer range (e.g., "0-60")
+            status: Download status (0=not_started, 1=downloading, 2=complete, 3=failed)
+        """
+        SHARD_DOWNLOAD_STATUS.labels(
+            model=model,
+            worker_id=worker_id,
+            layer_range=layer_range
+        ).set(status)
 
 # Global metrics collector instance
 coordinator_metrics = CoordinatorMetrics()

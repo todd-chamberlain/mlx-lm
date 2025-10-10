@@ -62,8 +62,8 @@ class MessageValidator:
         # Validate model
         if not request.model or not request.model.strip():
             errors.append("model is required and cannot be empty")
-        elif not re.match(r'^[a-zA-Z0-9_-]+$', request.model):
-            errors.append("model name can only contain alphanumeric characters, hyphens, and underscores")
+        elif not re.match(r'^[a-zA-Z0-9_/.:-]+$', request.model):
+            errors.append("model name can only contain alphanumeric characters, hyphens, underscores, periods, colons, and slashes")
         
         return errors
     
@@ -107,15 +107,13 @@ class MessageValidator:
         else:
             errors.append("device_info is required")
         
-        # Validate supported_models
-        if not registration.supported_models:
-            errors.append("at least one supported model must be specified")
-        else:
+        # Validate supported_models (optional - workers can start with no models for dynamic loading)
+        if registration.supported_models:
             for model in registration.supported_models:
                 if not model or not model.strip():
                     errors.append("supported model names cannot be empty")
-                elif not re.match(r'^[a-zA-Z0-9_-]+$', model):
-                    errors.append(f"invalid model name '{model}': can only contain alphanumeric characters, hyphens, and underscores")
+                elif not re.match(r'^[a-zA-Z0-9_/.:-]+$', model):
+                    errors.append(f"invalid model name '{model}': can only contain alphanumeric characters, hyphens, underscores, periods, colons, and slashes")
         
         return errors
     

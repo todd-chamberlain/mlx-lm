@@ -5,11 +5,19 @@ This is the main entry point for the MLX worker that coordinates all components:
 model management, inference engine, gRPC service, coordinator client, and health monitoring.
 """
 
+import os
+import sys
+
+# CRITICAL: Set HuggingFace cache location BEFORE importing any HF libraries
+# This must be done before any imports that might use transformers/huggingface_hub
+HF_HOME = os.getenv('HF_HOME', '/Users/Shared/models/.cache')
+os.environ['HF_HOME'] = HF_HOME
+os.environ['TRANSFORMERS_CACHE'] = HF_HOME
+os.environ['HF_HUB_CACHE'] = HF_HOME
+
 import asyncio
 import logging
 import signal
-import sys
-import os
 import argparse
 import yaml
 from pathlib import Path
@@ -45,8 +53,8 @@ class WorkerConfig:
             'worker_id': os.getenv('WORKER_ID', f'worker-{os.uname().nodename}'),
             'port': int(os.getenv('WORKER_PORT', '8080')),
             'coordinator_host': os.getenv('COORDINATOR_HOST', 'localhost:50051'),
-            'model_path': os.getenv('MODEL_PATH', '/models/default'),
-            'model_name': os.getenv('MODEL_NAME', 'default'),
+            'model_path': os.getenv('MODEL_PATH', ''),  # Empty by default - models loaded on demand
+            'model_name': os.getenv('MODEL_NAME', ''),  # Empty by default
             'max_concurrent': int(os.getenv('MAX_CONCURRENT', '4')),
             'heartbeat_interval': int(os.getenv('HEARTBEAT_INTERVAL', '10')),
             'health_check_interval': float(os.getenv('HEALTH_CHECK_INTERVAL', '30.0')),
@@ -124,18 +132,56 @@ class MLXWorker:
         try:
             logger.info("Initializing MLX Worker...")
             
-            # Load model
-            model_path = self.config['model_path']
-            model_name = self.config['model_name']
+            # Load model (optional - can download on demand)
+            model_path = self.config.get('model_path', '')
+            model_name = self.config.get('model_name', 'default')
             
-            if not Path(model_path).exists():
-                logger.error(f"Model path does not exist: {model_path}")
-                return False
+            # Try to load model from path or HuggingFace cache
+            model_loaded = False
             
-            logger.info(f"Loading model: {model_name} from {model_path}")
-            if not self.model_manager.load_model(model_path, model_name):
-                logger.error("Failed to load model")
-                return False
+            if model_path and Path(model_path).exists():
+                logger.info(f"Loading model: {model_name} from {model_path}")
+                model_loaded = self.model_manager.load_model(model_path, model_name)
+                if not model_loaded:
+                    logger.warning("Failed to load model from path")
+            
+            # If not loaded and model_name looks like a HuggingFace ID, try loading from cache
+            if not model_loaded and model_name and model_name != 'default' and '/' in model_name:
+                try:
+                    import os
+                    from mlx_lm import load
+                    from .model_manager import ModelInfo
+                    import time
+                    
+                    logger.info(f"Attempting to load {model_name} from HuggingFace cache...")
+                    
+                    # Try to load from cache (will fail if not cached)
+                    model, tokenizer = load(model_name)
+                    
+                    # Add to model manager
+                    model_info = ModelInfo(
+                        model_path=model_name,
+                        model_name=model_name,
+                        model=model,
+                        tokenizer=tokenizer,
+                        loaded_at=time.time(),
+                        memory_usage_gb=2.0,
+                        max_tokens=4096,
+                        context_length=4096
+                    )
+                    
+                    with self.model_manager.model_lock:
+                        self.model_manager.loaded_models[model_name] = model_info
+                    
+                    logger.info(f"Successfully loaded {model_name} from cache")
+                    model_loaded = True
+                    
+                except Exception as e:
+                    logger.info(f"Could not load {model_name} from cache: {e}")
+                    logger.info("Model will be downloaded on first request")
+            
+            if not model_loaded:
+                logger.info(f"No model loaded at startup, models will be downloaded on demand")
             
             # Discover coordinator if needed
             coordinator_host = self.config['coordinator_host']
@@ -157,6 +203,9 @@ class MLXWorker:
         """Start all services"""
         try:
             logger.info("Starting MLX Worker services...")
+            
+            # Set coordinator client reference in gRPC server
+            self.grpc_server.set_coordinator_client(self.coordinator_client)
             
             # Start gRPC server
             await self.grpc_server.start()

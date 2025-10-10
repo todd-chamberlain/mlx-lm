@@ -212,6 +212,41 @@ class InferenceEngine:
             if validation_error:
                 raise ValueError(validation_error)
             
+            # ============================================================
+            # SHARDING DECISION POINT: Inference Routing
+            # ============================================================
+            # This is where we decide whether to use standard inference or
+            # distributed sharded inference based on the model's metadata.
+            #
+            # Decision criteria:
+            # - If model_info['is_sharded'] == True: Use distributed pipeline
+            # - If model_info['is_sharded'] == False: Use standard inference
+            #
+            # The 'is_sharded' flag is set by ModelManager when loading a model
+            # with shard_metadata (see ModelManager.load_sharded_model).
+            # ============================================================
+            
+            model_info = self.model_manager.get_model_info_dict(request.model)
+            is_sharded = model_info and model_info.get('is_sharded', False)
+            
+            logger.info(
+                f"Routing inference request",
+                extra={
+                    "request_id": request.request_id,
+                    "model": request.model,
+                    "worker_id": self.worker_id,
+                    "is_sharded": is_sharded,
+                    "routing_decision": "sharded_pipeline" if is_sharded else "standard_inference",
+                    "operation": "inference_routing"
+                }
+            )
+            
+            if is_sharded:
+                # Route to distributed inference pipeline
+                # This will use DistributedForwardPass to execute across multiple workers
+                return await self._process_sharded_inference(request, model_info)
+            
+            # Standard (non-sharded) inference path
             # Get model and tokenizer
             model_tuple = self.model_manager.get_model(request.model)
             if not model_tuple:
@@ -340,6 +375,40 @@ class InferenceEngine:
             if validation_error:
                 raise ValueError(validation_error)
             
+            # ============================================================
+            # SHARDING DECISION POINT: Streaming Inference Routing
+            # ============================================================
+            # Similar to standard inference, we route streaming requests based
+            # on whether the model is sharded.
+            #
+            # Decision criteria:
+            # - If model_info['is_sharded'] == True: Use distributed streaming
+            # - If model_info['is_sharded'] == False: Use standard streaming
+            # ============================================================
+            
+            model_info = self.model_manager.get_model_info_dict(request.model)
+            is_sharded = model_info and model_info.get('is_sharded', False)
+            
+            logger.info(
+                f"Routing streaming inference request",
+                extra={
+                    "request_id": request.request_id,
+                    "model": request.model,
+                    "worker_id": self.worker_id,
+                    "is_sharded": is_sharded,
+                    "routing_decision": "sharded_streaming_pipeline" if is_sharded else "standard_streaming",
+                    "operation": "streaming_inference_routing"
+                }
+            )
+            
+            if is_sharded:
+                # Route to distributed streaming inference pipeline
+                # This will use DistributedForwardPass for streaming generation
+                async for chunk in self._stream_sharded_inference(request, model_info):
+                    yield chunk
+                return
+            
+            # Standard (non-sharded) streaming inference path
             # Get model and tokenizer
             model_tuple = self.model_manager.get_model(request.model)
             if not model_tuple:
@@ -568,3 +637,319 @@ class InferenceEngine:
         profile['enabled'] = True
         
         return profile
+    
+    async def _process_sharded_inference(
+        self,
+        request: InferenceRequest,
+        model_info: Dict[str, Any]
+    ) -> InferenceResponse:
+        """
+        Process inference request for sharded model using distributed pipeline.
+        
+        Args:
+            request: Inference request
+            model_info: Model information including shard metadata
+            
+        Returns:
+            InferenceResponse with results from distributed pipeline
+        """
+        from .distributed_forward import DistributedForwardPass
+        
+        start_time = time.time()
+        # ============================================================
+        # SHARD METADATA USAGE: Pipeline Validation
+        # ============================================================
+        # Shard metadata contains information about this worker's role in the
+        # distributed pipeline. Key fields:
+        # - is_first_worker: Must be True to initiate inference
+        # - start_layer/end_layer: Layer range this worker handles
+        # - next_worker_id/next_worker_address: Next worker in pipeline
+        #
+        # Only the first worker in the pipeline can initiate inference.
+        # Subsequent workers receive activations from previous workers.
+        # ============================================================
+        
+        shard_metadata = model_info.get('shard_metadata', {})
+        
+        # Check if this is the first worker in the pipeline
+        if not shard_metadata.get('is_first_worker', False):
+            raise RuntimeError(
+                f"Sharded inference must be initiated on first worker in pipeline. "
+                f"This worker handles layers {shard_metadata.get('start_layer')}-"
+                f"{shard_metadata.get('end_layer')}"
+            )
+        
+        logger.info(
+            f"Processing sharded inference request through distributed pipeline",
+            extra={
+                "request_id": request.request_id,
+                "model": request.model,
+                "worker_id": self.worker_id,
+                "start_layer": shard_metadata.get('start_layer'),
+                "end_layer": shard_metadata.get('end_layer'),
+                "layer_range": f"{shard_metadata.get('start_layer')}-{shard_metadata.get('end_layer')}",
+                "next_worker": shard_metadata.get('next_worker_id'),
+                "operation": "sharded_inference_start"
+            }
+        )
+        
+        # Get model and tokenizer
+        model_tuple = self.model_manager.get_model(request.model)
+        if not model_tuple:
+            raise RuntimeError(f"Model {request.model} not available")
+        
+        model, tokenizer = model_tuple
+        
+        # Tokenize prompt
+        prompt_tokens = self._count_tokens(tokenizer, request.prompt)
+        input_ids = tokenizer.encode(request.prompt)
+        input_tensor = mx.array(input_ids).reshape(1, -1)
+        
+        # Build pipeline configuration from shard metadata
+        node_assignments = {
+            self.worker_id: list(range(
+                shard_metadata['start_layer'],
+                shard_metadata['end_layer']
+            ))
+        }
+        
+        node_addresses = {}
+        
+        # Add next worker if present
+        if shard_metadata.get('next_worker_id'):
+            next_worker_id = shard_metadata['next_worker_id']
+            next_worker_address = shard_metadata['next_worker_address']
+            
+            # Estimate next worker's layer range
+            # This should come from coordinator in production
+            total_layers = model_info.get('num_layers', 120)
+            next_start = shard_metadata['end_layer']
+            next_end = total_layers
+            
+            node_assignments[next_worker_id] = list(range(next_start, next_end))
+            node_addresses[next_worker_id] = next_worker_address
+        
+        # Create distributed forward pass
+        forward_pass = DistributedForwardPass(
+            pipeline_id=request.request_id,
+            node_assignments=node_assignments,
+            node_addresses=node_addresses,
+            compression="zstd",
+            timeout=30.0
+        )
+        
+        try:
+            # Execute distributed forward pass
+            output_logits = await forward_pass.forward(
+                input_ids=input_tensor,
+                request_id=request.request_id
+            )
+            
+            # Sample token from logits (greedy sampling for simplicity)
+            next_token_id = int(mx.argmax(output_logits[0, -1, :]).item())
+            
+            # Generate remaining tokens
+            generated_tokens = [next_token_id]
+            for _ in range(request.max_tokens - 1):
+                next_input = mx.array([[next_token_id]])
+                output_logits = await forward_pass.forward(
+                    input_ids=next_input,
+                    request_id=request.request_id
+                )
+                next_token_id = int(mx.argmax(output_logits[0, -1, :]).item())
+                generated_tokens.append(next_token_id)
+                
+                # Check for EOS
+                if next_token_id == tokenizer.eos_token_id:
+                    break
+            
+            # Decode response
+            response_text = tokenizer.decode(generated_tokens)
+            
+            # Calculate metrics
+            total_time = time.time() - start_time
+            latency_ms = total_time * 1000
+            tokens_per_second = len(generated_tokens) / total_time if total_time > 0 else 0
+            
+            logger.info(
+                f"Completed sharded inference request",
+                extra={
+                    "request_id": request.request_id,
+                    "model": request.model,
+                    "worker_id": self.worker_id,
+                    "latency_ms": latency_ms,
+                    "tokens_generated": len(generated_tokens),
+                    "tokens_per_second": tokens_per_second,
+                    "operation": "sharded_inference_complete"
+                }
+            )
+            
+            return InferenceResponse(
+                request_id=request.request_id,
+                text=response_text,
+                tokens=generated_tokens,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=len(generated_tokens),
+                tokens_per_second=tokens_per_second,
+                worker_id=self.worker_id,
+                latency_ms=latency_ms
+            )
+            
+        except Exception as e:
+            logger.error(
+                f"Sharded inference failed",
+                extra={
+                    "request_id": request.request_id,
+                    "model": request.model,
+                    "worker_id": self.worker_id,
+                    "error": str(e),
+                    "operation": "sharded_inference_error"
+                }
+            )
+            raise RuntimeError(f"Sharded inference failed: {str(e)}") from e
+            
+        finally:
+            await forward_pass.close()
+    
+    async def _stream_sharded_inference(
+        self,
+        request: InferenceRequest,
+        model_info: Dict[str, Any]
+    ) -> Iterator[StreamChunk]:
+        """
+        Process streaming inference request for sharded model using distributed pipeline.
+        
+        Args:
+            request: Inference request
+            model_info: Model information including shard metadata
+            
+        Yields:
+            StreamChunk objects with generated tokens
+        """
+        from .distributed_forward import DistributedForwardPass
+        
+        start_time = time.time()
+        shard_metadata = model_info.get('shard_metadata', {})
+        
+        # Check if this is the first worker in the pipeline
+        if not shard_metadata.get('is_first_worker', False):
+            raise RuntimeError(
+                f"Sharded streaming inference must be initiated on first worker. "
+                f"This worker handles layers {shard_metadata.get('start_layer')}-"
+                f"{shard_metadata.get('end_layer')}"
+            )
+        
+        logger.info(
+            f"Processing sharded streaming inference request {request.request_id} "
+            f"through distributed pipeline"
+        )
+        
+        # Get model and tokenizer
+        model_tuple = self.model_manager.get_model(request.model)
+        if not model_tuple:
+            raise RuntimeError(f"Model {request.model} not available")
+        
+        model, tokenizer = model_tuple
+        
+        # Tokenize prompt
+        input_ids = tokenizer.encode(request.prompt)
+        input_tensor = mx.array(input_ids).reshape(1, -1)
+        
+        # Build pipeline configuration
+        node_assignments = {
+            self.worker_id: list(range(
+                shard_metadata['start_layer'],
+                shard_metadata['end_layer']
+            ))
+        }
+        
+        node_addresses = {}
+        
+        # Add next worker if present
+        if shard_metadata.get('next_worker_id'):
+            next_worker_id = shard_metadata['next_worker_id']
+            next_worker_address = shard_metadata['next_worker_address']
+            
+            total_layers = model_info.get('num_layers', 120)
+            next_start = shard_metadata['end_layer']
+            next_end = total_layers
+            
+            node_assignments[next_worker_id] = list(range(next_start, next_end))
+            node_addresses[next_worker_id] = next_worker_address
+        
+        # Create distributed forward pass
+        forward_pass = DistributedForwardPass(
+            pipeline_id=request.request_id,
+            node_assignments=node_assignments,
+            node_addresses=node_addresses,
+            compression="zstd",
+            timeout=30.0
+        )
+        
+        try:
+            # Execute distributed forward pass for prompt
+            output_logits = await forward_pass.forward(
+                input_ids=input_tensor,
+                request_id=request.request_id
+            )
+            
+            # Sample first token
+            next_token_id = int(mx.argmax(output_logits[0, -1, :]).item())
+            
+            # Stream tokens
+            token_count = 0
+            for _ in range(request.max_tokens):
+                # Decode token
+                token_text = tokenizer.decode([next_token_id])
+                
+                # Create and yield chunk
+                chunk = StreamChunk(
+                    request_id=request.request_id,
+                    text=token_text,
+                    token=next_token_id,
+                    is_final=False,
+                    worker_id=self.worker_id
+                )
+                yield chunk
+                token_count += 1
+                
+                # Check for EOS
+                if next_token_id == tokenizer.eos_token_id:
+                    break
+                
+                # Generate next token
+                next_input = mx.array([[next_token_id]])
+                output_logits = await forward_pass.forward(
+                    input_ids=next_input,
+                    request_id=request.request_id
+                )
+                next_token_id = int(mx.argmax(output_logits[0, -1, :]).item())
+                
+                # Allow other coroutines to run
+                await asyncio.sleep(0)
+            
+            # Send final chunk
+            final_chunk = StreamChunk(
+                request_id=request.request_id,
+                text="",
+                token=0,
+                is_final=True,
+                worker_id=self.worker_id
+            )
+            yield final_chunk
+            
+            total_time = time.time() - start_time
+            tokens_per_second = token_count / total_time if total_time > 0 else 0
+            
+            logger.info(
+                f"Completed sharded streaming inference {request.request_id} "
+                f"with {token_count} tokens in {total_time:.2f}s "
+                f"({tokens_per_second:.2f} tokens/sec)"
+            )
+            
+        except Exception as e:
+            logger.error(f"Sharded streaming inference failed for {request.request_id}: {e}")
+            raise RuntimeError(f"Sharded streaming inference failed: {str(e)}") from e
+            
+        finally:
+            await forward_pass.close()

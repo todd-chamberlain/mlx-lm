@@ -36,13 +36,15 @@ class CoordinatorClient:
     def __init__(self, worker_id: str, model_manager: ModelManager, 
                  inference_engine: InferenceEngine, worker_port: int,
                  coordinator_host: str = "localhost:50051",
-                 heartbeat_interval: int = 10):
+                 heartbeat_interval: int = 10,
+                 config: Optional[Dict] = None):
         self.worker_id = worker_id
         self.model_manager = model_manager
         self.inference_engine = inference_engine
         self.worker_port = worker_port
         self.coordinator_host = coordinator_host
         self.heartbeat_interval = heartbeat_interval
+        self.config = config or {}
         
         self.channel: Optional[grpc_aio.Channel] = None
         self.stub: Optional[CoordinatorServiceStub] = None
@@ -106,18 +108,28 @@ class CoordinatorClient:
     
     def _get_worker_address(self) -> str:
         """Get the worker's network address"""
-        try:
-            # Get local IP address
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                # Connect to a remote address to determine local IP
-                s.connect(("8.8.8.8", 80))
-                local_ip = s.getsockname()[0]
-            
-            return f"{local_ip}:{self.worker_port}"
-            
-        except Exception as e:
-            logger.warning(f"Failed to determine local IP: {e}")
+        import socket
+        
+        # Try to determine the actual IP address
+        # If coordinator is remote, use our external IP
+        # If coordinator is localhost, use localhost
+        coordinator_host = self.coordinator_host.split(':')[0]
+        
+        if coordinator_host in ['localhost', '127.0.0.1', '::1']:
+            # Coordinator is local, use localhost
             return f"localhost:{self.worker_port}"
+        else:
+            # Coordinator is remote, get our IP address
+            try:
+                # Create a socket to determine which interface would be used to reach coordinator
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect((coordinator_host, 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+                return f"{local_ip}:{self.worker_port}"
+            except Exception as e:
+                logger.warning(f"Could not determine local IP: {e}, using localhost")
+                return f"localhost:{self.worker_port}"
     
     def _create_device_info(self) -> pb.DeviceInfo:
         """Create device info message"""
@@ -133,8 +145,33 @@ class CoordinatorClient:
     
     def _get_supported_models(self) -> list:
         """Get list of supported/loaded models"""
-        loaded_models = self.model_manager.list_loaded_models()
-        return list(loaded_models.keys())
+        try:
+            # Try to get loaded models with a quick check
+            # Use trylock to avoid blocking if model is being loaded
+            if self.model_manager.model_lock.acquire(blocking=False):
+                try:
+                    models = list(self.model_manager.loaded_models.keys())
+                finally:
+                    self.model_manager.model_lock.release()
+            else:
+                # Lock is held, use cached value or fallback
+                logger.debug("Model lock held, using fallback")
+                models = []
+            
+            logger.info(f"[DEBUG] Loaded models from model_manager: {models}")
+            
+            # If no models loaded yet, include the configured model name
+            if not models and self.config:
+                model_name = self.config.get('model_name', '')
+                if model_name:
+                    models.append(model_name)
+                    logger.info(f"[DEBUG] No loaded models, using configured model_name: {model_name}")
+            
+            logger.info(f"[DEBUG] Returning supported models: {models}")
+            return models
+        except Exception as e:
+            logger.error(f"Error getting supported models: {e}")
+            return ['default']
     
     async def register(self, max_concurrent: int = 4) -> bool:
         """Register worker with the coordinator"""
@@ -153,6 +190,7 @@ class CoordinatorClient:
             )
             
             logger.info(f"Registering worker {self.worker_id} with coordinator...")
+            logger.info(f"Supported models: {self._get_supported_models()}")
             
             # Send registration request
             response = await self.stub.RegisterWorker(registration)
@@ -172,6 +210,16 @@ class CoordinatorClient:
         except Exception as e:
             logger.error(f"Unexpected error during registration: {e}")
             return False
+    
+    async def update_supported_models(self) -> bool:
+        """Update the coordinator with current supported models (re-register)"""
+        if not self.registered:
+            logger.warning("Worker not registered, cannot update supported models")
+            return False
+        
+        logger.info("Updating supported models with coordinator...")
+        # Re-register to update supported models
+        return await self.register(self.config.get('max_concurrent', 4))
     
     async def start_heartbeat(self):
         """Start the heartbeat task"""
@@ -198,15 +246,29 @@ class CoordinatorClient:
         consecutive_failures = 0
         max_failures = 3
         
+        logger.info("Heartbeat loop started")
+        logger.info(f"Shutdown event is_set: {self.shutdown_event.is_set()}")
+        
         while not self.shutdown_event.is_set():
             try:
+                logger.info("Heartbeat loop iteration starting")
+                logger.info(f"Registered status: {self.registered}")
                 if not self.registered:
                     logger.warning("Worker not registered, skipping heartbeat")
                     await asyncio.sleep(self.heartbeat_interval)
                     continue
                 
-                # Send heartbeat
-                success = await self._send_heartbeat()
+                logger.info("About to send heartbeat")
+                # Send heartbeat with timeout
+                try:
+                    success = await asyncio.wait_for(self._send_heartbeat(), timeout=8.0)
+                    logger.info(f"Heartbeat send result: {success}")
+                except asyncio.TimeoutError:
+                    logger.error("Heartbeat send timed out")
+                    success = False
+                except Exception as e:
+                    logger.error(f"Heartbeat send failed: {e}")
+                    success = False
                 
                 if success:
                     consecutive_failures = 0
@@ -218,9 +280,14 @@ class CoordinatorClient:
                         logger.error("Too many consecutive heartbeat failures, attempting re-registration")
                         self.registered = False
                         
-                        # Try to reconnect and re-register
-                        if await self.connect():
-                            await self.register()
+                        # Try to reconnect and re-register with timeout
+                        try:
+                            if await self.connect():
+                                await asyncio.wait_for(self.register(), timeout=10.0)
+                        except asyncio.TimeoutError:
+                            logger.error("Re-registration timed out, will retry on next heartbeat")
+                        except Exception as e:
+                            logger.error(f"Re-registration failed: {e}")
                         
                         consecutive_failures = 0
                 
@@ -245,8 +312,9 @@ class CoordinatorClient:
             memory_usage = self.model_manager.get_memory_usage()
             
             # Create status message
+            # Health is determined by successful heartbeat and resource availability
             status = pb.WorkerStatus(
-                status="healthy",  # TODO: Add health determination logic
+                status="healthy",
                 current_load=metrics['active_requests'],
                 memory_usage_percent=memory_usage['percent'],
                 uptime_seconds=int(time.time() - self.inference_engine.metrics.total_requests)  # Approximate
@@ -262,14 +330,22 @@ class CoordinatorClient:
                 memory_usage_gb=memory_usage['used_gb']
             )
             
-            # Create heartbeat request
+            # Create heartbeat request with current supported models
+            try:
+                supported_models = self._get_supported_models()
+            except Exception as e:
+                logger.warning(f"Failed to get supported models for heartbeat: {e}")
+                supported_models = []
+            
             heartbeat_request = pb.HeartbeatRequest(
                 worker_id=self.worker_id,
                 status=status,
-                metrics=worker_metrics
+                metrics=worker_metrics,
+                supported_models=supported_models
             )
             
             # Send heartbeat
+            logger.debug(f"Sending heartbeat with {len(supported_models)} models: {supported_models}")
             response = await asyncio.wait_for(
                 self.stub.Heartbeat(heartbeat_request),
                 timeout=5.0

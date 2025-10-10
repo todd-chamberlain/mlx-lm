@@ -9,6 +9,10 @@ service CoordinatorService {
     rpc StreamInference(InferenceRequest) returns (stream StreamChunk);
     rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
     rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+    rpc DownloadModel(ModelDownloadRequest) returns (ModelDownloadResponse);
+    rpc GetDownloadStatus(ModelStatusRequest) returns (ModelStatusResponse);
+    rpc DeleteModel(ModelDeleteRequest) returns (ModelDeleteResponse);
+    rpc GetShardStatus(ShardStatusRequest) returns (ShardStatusResponse);
 }
 
 // Inference Service - runs on MLX workers
@@ -17,6 +21,9 @@ service InferenceService {
     rpc StreamInference(InferenceRequest) returns (stream StreamChunk);
     rpc HealthCheck(Empty) returns (HealthStatus);
     rpc GetMetrics(Empty) returns (WorkerMetrics);
+    rpc DownloadModel(ModelDownloadRequest) returns (ModelDownloadResponse);
+    rpc GetModelStatus(ModelStatusRequest) returns (ModelStatusResponse);
+    rpc DeleteModel(ModelDeleteRequest) returns (ModelDeleteResponse);
 }
 
 // Core request/response messages
@@ -78,6 +85,7 @@ message HeartbeatRequest {
     string worker_id = 1;
     WorkerStatus status = 2;
     WorkerMetrics metrics = 3;
+    repeated string supported_models = 4;  // Current list of loaded models
 }
 
 message HeartbeatResponse {
@@ -125,6 +133,88 @@ message HealthStatus {
     string status = 1;
     string message = 2;
     WorkerMetrics metrics = 3;
+}
+
+// Model management messages
+message ModelDownloadRequest {
+    string model_name = 1;
+    bool force_redownload = 2;
+    LayerAssignment layer_assignment = 3;  // Optional: for sharded downloads
+}
+
+// Layer assignment for sharded models
+message LayerAssignment {
+    string worker_id = 1;
+    int32 start_layer = 2;
+    int32 end_layer = 3;  // Exclusive
+    string next_worker_id = 4;
+    string next_worker_address = 5;
+}
+
+message ModelDownloadResponse {
+    bool success = 1;
+    string message = 2;
+    string download_id = 3;
+    int32 workers_notified = 4;
+}
+
+message ModelStatusRequest {
+    string model_name = 1;
+    string download_id = 2;
+}
+
+message ModelStatusResponse {
+    string model_name = 1;
+    string status = 2;  // downloading, ready, failed, not_found
+    float progress_percent = 3;
+    int64 size_bytes = 4;
+    repeated WorkerModelStatus worker_status = 5;
+}
+
+message WorkerModelStatus {
+    string worker_id = 1;
+    string status = 2;
+    float progress_percent = 3;
+    string error = 4;
+}
+
+// Model deletion messages
+message ModelDeleteRequest {
+    string model_name = 1;
+}
+
+message ModelDeleteResponse {
+    bool success = 1;
+    string message = 2;
+    int32 workers_deleted = 3;
+    repeated WorkerDeleteStatus worker_status = 4;
+}
+
+message WorkerDeleteStatus {
+    string worker_id = 1;
+    bool success = 2;
+    string error = 3;
+}
+
+// Shard status messages
+message ShardStatusRequest {
+    string model_name = 1;
+}
+
+message ShardStatusResponse {
+    bool is_sharded = 1;
+    string model_name = 2;
+    int32 total_layers = 3;
+    string status = 4;  // downloading, ready, failed, partial
+    repeated ShardAssignmentStatus shard_assignments = 5;
+}
+
+message ShardAssignmentStatus {
+    string worker_id = 1;
+    int32 start_layer = 2;
+    int32 end_layer = 3;
+    string download_status = 4;  // pending, in_progress, completed, failed
+    string next_worker_id = 5;
 }
 
 // Utility messages

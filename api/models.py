@@ -114,6 +114,14 @@ class ModelsResponse(BaseModel):
     data: List[ModelInfo] = Field(..., description="List of model objects")
 
 
+class ShardedModelHealth(BaseModel):
+    """Health information for a sharded model."""
+    model_name: str = Field(..., description="Model name")
+    total_shards: int = Field(..., description="Total number of shards")
+    healthy_shards: int = Field(..., description="Number of healthy shards")
+    status: Literal["ready", "degraded", "offline"] = Field(..., description="Model status")
+
+
 class HealthResponse(BaseModel):
     """Response model for health checks."""
     status: Literal["healthy", "unhealthy", "degraded"] = Field(..., description="Overall system status")
@@ -121,6 +129,8 @@ class HealthResponse(BaseModel):
     healthy_workers: int = Field(..., description="Number of healthy workers")
     active_requests: int = Field(..., description="Number of active requests")
     timestamp: int = Field(..., description="Unix timestamp")
+    sharded_model_count: Optional[int] = Field(None, description="Number of sharded models")
+    sharded_models: Optional[List[ShardedModelHealth]] = Field(None, description="Health status of sharded models")
     error: Optional[str] = Field(None, description="Error message if any")
 
 
@@ -134,3 +144,56 @@ class ErrorDetail(BaseModel):
 class ErrorResponse(BaseModel):
     """OpenAI-compatible error response."""
     error: ErrorDetail = Field(..., description="Error details")
+
+
+class ModelDownloadRequest(BaseModel):
+    """Request model for downloading a model."""
+    model_name: str = Field(..., description="Name of the model to download")
+    enable_sharding: Optional[bool] = Field(False, description="Enable automatic sharding across workers")
+    force_redownload: Optional[bool] = Field(False, description="Force redownload if model exists")
+
+
+class LayerAssignmentInfo(BaseModel):
+    """Information about layer assignment for a worker."""
+    worker_id: str = Field(..., description="Worker identifier")
+    start_layer: int = Field(..., description="Starting layer index (inclusive)")
+    end_layer: int = Field(..., description="Ending layer index (exclusive)")
+    next_worker_id: Optional[str] = Field(None, description="Next worker in pipeline")
+
+
+class ShardPlan(BaseModel):
+    """Shard plan for a model."""
+    model_name: str = Field(..., description="Model name")
+    total_layers: int = Field(..., description="Total number of layers")
+    assignments: List[LayerAssignmentInfo] = Field(..., description="Layer assignments per worker")
+
+
+class ModelDownloadResponse(BaseModel):
+    """Response model for model download."""
+    success: bool = Field(..., description="Whether download was initiated successfully")
+    message: str = Field(..., description="Status message")
+    download_id: str = Field(..., description="Unique download identifier")
+    workers_notified: int = Field(..., description="Number of workers notified")
+    is_sharded: bool = Field(False, description="Whether model is being sharded")
+    shard_plan: Optional[ShardPlan] = Field(None, description="Shard plan if sharding is enabled")
+
+
+class WorkerShardStatus(BaseModel):
+    """Status of a shard on a worker."""
+    worker_id: str = Field(..., description="Worker identifier")
+    start_layer: int = Field(..., description="Starting layer index")
+    end_layer: int = Field(..., description="Ending layer index")
+    status: str = Field(..., description="Download/load status")
+    progress_percent: float = Field(..., description="Download progress percentage")
+    error: Optional[str] = Field(None, description="Error message if any")
+
+
+class ShardStatusResponse(BaseModel):
+    """Response model for shard status."""
+    model_name: str = Field(..., description="Model name")
+    is_sharded: bool = Field(..., description="Whether model is sharded")
+    total_layers: int = Field(..., description="Total number of layers")
+    shard_assignments: List[WorkerShardStatus] = Field(..., description="Shard status per worker")
+    overall_status: str = Field(..., description="Overall status (READY, DOWNLOADING, FAILED)")
+    inference_count: Optional[int] = Field(None, description="Number of inferences performed")
+    avg_latency_ms: Optional[float] = Field(None, description="Average inference latency in ms")

@@ -53,6 +53,7 @@ class BaseConfig(BaseSettings):
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = False
+        extra = "ignore"  # Ignore extra fields from .env file
 
 
 class NetworkConfig(BaseConfig):
@@ -109,6 +110,75 @@ class SecurityConfig(BaseConfig):
         for key in v:
             if len(key) < 32:
                 raise ValueError("API keys must be at least 32 characters long")
+        return v
+
+
+class ShardingConfig(BaseConfig):
+    """Automatic model sharding configuration."""
+    
+    # Enable/disable automatic sharding
+    enable_auto_sharding: bool = Field(default=False, env="ENABLE_AUTO_SHARDING")
+    
+    # Minimum model size (in GB) to trigger automatic sharding
+    shard_threshold_gb: float = Field(default=30.0, env="SHARD_THRESHOLD_GB")
+    
+    # Sharding strategy
+    strategy: str = Field(default="balanced", env="SHARD_STRATEGY")  # balanced, memory_aware
+    
+    # Activation compression settings
+    compression_enabled: bool = Field(default=True, env="SHARD_COMPRESSION_ENABLED")
+    compression_algorithm: str = Field(default="zstd", env="SHARD_COMPRESSION_ALGORITHM")  # zstd, lz4, none
+    compression_level: int = Field(default=3, env="SHARD_COMPRESSION_LEVEL")
+    
+    # Activation transfer settings
+    activation_timeout_ms: int = Field(default=5000, env="ACTIVATION_TIMEOUT_MS")
+    max_pipeline_depth: int = Field(default=4, env="MAX_PIPELINE_DEPTH")
+    
+    # Minimum workers required for sharding
+    min_workers_for_sharding: int = Field(default=2, env="MIN_WORKERS_FOR_SHARDING")
+    
+    @validator("shard_threshold_gb")
+    def validate_shard_threshold(cls, v):
+        if v <= 0:
+            raise ValueError("shard_threshold_gb must be positive")
+        return v
+    
+    @validator("strategy")
+    def validate_strategy(cls, v):
+        valid_strategies = {"balanced", "memory_aware"}
+        if v.lower() not in valid_strategies:
+            raise ValueError(f"strategy must be one of: {', '.join(valid_strategies)}")
+        return v.lower()
+    
+    @validator("compression_algorithm")
+    def validate_compression_algorithm(cls, v):
+        valid_algorithms = {"zstd", "lz4", "none"}
+        if v.lower() not in valid_algorithms:
+            raise ValueError(f"compression_algorithm must be one of: {', '.join(valid_algorithms)}")
+        return v.lower()
+    
+    @validator("compression_level")
+    def validate_compression_level(cls, v):
+        if not (1 <= v <= 22):  # ZSTD supports levels 1-22
+            raise ValueError("compression_level must be between 1 and 22")
+        return v
+    
+    @validator("activation_timeout_ms")
+    def validate_activation_timeout(cls, v):
+        if v <= 0:
+            raise ValueError("activation_timeout_ms must be positive")
+        return v
+    
+    @validator("max_pipeline_depth")
+    def validate_max_pipeline_depth(cls, v):
+        if v < 2:
+            raise ValueError("max_pipeline_depth must be at least 2")
+        return v
+    
+    @validator("min_workers_for_sharding")
+    def validate_min_workers(cls, v):
+        if v < 2:
+            raise ValueError("min_workers_for_sharding must be at least 2")
         return v
 
 

@@ -45,6 +45,39 @@ This guide provides step-by-step instructions for deploying the MLX Distributed 
   - API: Port 8000 (API server)
   - Monitoring: Ports 3000, 9090, 16686
 
+### Automatic Model Sharding Prerequisites
+
+For deploying large models with automatic sharding:
+
+- **Minimum Workers**: 2+ workers required for sharding
+- **Network Latency**: < 10ms between workers (< 5ms recommended)
+  - Test with: `ping -c 100 <other-worker-ip>`
+  - Thunderbolt 3/4: Typically < 1ms
+  - 10 Gigabit Ethernet: Typically < 2ms
+- **Network Bandwidth**: 1 Gbps minimum, 10 Gbps recommended
+  - Test with: `iperf3 -c <other-worker-ip>`
+- **Disk Space**: Sufficient for partial model on each worker
+  - Example: 70B model requires ~35GB per worker
+- **Memory**: Sufficient for partial model + activations
+  - Example: 70B model requires ~30GB per worker
+
+**Network Performance Test:**
+
+```bash
+# Install iperf3 if needed
+brew install iperf3
+
+# On Mac Studio 1
+iperf3 -s
+
+# On Mac Studio 2
+iperf3 -c <studio1-ip>
+
+# Expected results for sharding:
+# - Bandwidth: > 1 Gbps (10+ Gbps ideal)
+# - Latency: < 10ms (< 5ms ideal)
+```
+
 ---
 
 ## Deployment Architecture
@@ -355,6 +388,216 @@ nettop -m tcp -t wifi0 -P -L 1
 - ✅ Activation transfer working between nodes
 - ✅ Distributed inference completing successfully
 - ✅ Network latency < 5ms between nodes
+
+---
+
+## Phase 3.5: Automatic Model Sharding Configuration (Optional)
+
+### Overview
+
+Automatic model sharding enables running models larger than single-node memory by distributing layers across workers during download. This is optional but recommended for large models (70B+ parameters).
+
+### Step 3.5.1: Enable Sharding in Coordinator
+
+Edit `config/coordinator.yaml`:
+
+```yaml
+sharding:
+  # Enable automatic sharding
+  enabled: true
+  
+  # Minimum model size (GB) to trigger auto-sharding
+  threshold_gb: 30
+  
+  # Partitioning strategy
+  # - 'balanced': Equal layers per worker (recommended)
+  # - 'memory_aware': Distribute based on worker memory
+  strategy: balanced
+  
+  # Activation compression algorithm
+  # - 'zstd': Best compression, ~5ms overhead (recommended)
+  # - 'lz4': Faster, less compression, ~2ms overhead
+  # - 'none': No compression (not recommended)
+  compression: zstd
+  
+  # Maximum time to wait for activation transfer (ms)
+  activation_timeout_ms: 5000
+  
+  # Maximum pipeline depth (number of workers in chain)
+  max_pipeline_depth: 4
+```
+
+Or use environment variables:
+
+```bash
+# Add to .env file
+export ENABLE_AUTO_SHARDING=true
+export SHARD_THRESHOLD_GB=30
+export ACTIVATION_COMPRESSION=zstd
+export ACTIVATION_TIMEOUT_MS=5000
+```
+
+### Step 3.5.2: Verify Network Performance
+
+Before enabling sharding, verify network meets requirements:
+
+```bash
+# Test latency (should be < 10ms, ideally < 5ms)
+ping -c 100 <studio2-ip>
+
+# Test bandwidth (should be > 1 Gbps, ideally 10+ Gbps)
+# On Studio 1:
+iperf3 -s
+
+# On Studio 2:
+iperf3 -c <studio1-ip>
+
+# Expected results:
+# - Bandwidth: 10+ Gbps (Thunderbolt) or 1+ Gbps (Ethernet)
+# - Latency: < 5ms average
+```
+
+### Step 3.5.3: Download Model with Sharding
+
+```bash
+# Download large model with automatic sharding
+curl -X POST http://localhost:8000/admin/download_model \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_name": "meta-llama/Llama-2-70b-chat-hf",
+    "enable_sharding": true
+  }'
+
+# Response includes shard plan:
+# {
+#   "success": true,
+#   "is_sharded": true,
+#   "workers_notified": 2,
+#   "shard_plan": {
+#     "total_layers": 80,
+#     "assignments": [
+#       {"worker_id": "worker-studio1", "start_layer": 0, "end_layer": 40},
+#       {"worker_id": "worker-studio2", "start_layer": 40, "end_layer": 80}
+#     ]
+#   }
+# }
+```
+
+### Step 3.5.4: Monitor Download Progress
+
+```bash
+# Check shard status
+curl http://localhost:8000/admin/models/meta-llama/Llama-2-70b-chat-hf/shards | jq
+
+# Monitor worker logs
+tail -f logs/worker-studio1.log | grep -i "download\|shard"
+tail -f logs/worker-studio2.log | grep -i "download\|shard"
+
+# Wait for overall_status: "READY"
+```
+
+### Step 3.5.5: Test Sharded Inference
+
+```bash
+# Run inference on sharded model
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-2-70b-chat-hf",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 100
+  }'
+
+# Check inference metrics
+curl http://localhost:8000/admin/models/meta-llama/Llama-2-70b-chat-hf/shards | jq '.avg_latency_ms'
+```
+
+### Step 3.5.6: Monitor Sharding Metrics
+
+```bash
+# View sharding-specific metrics
+curl http://localhost:8000/metrics | grep -E "shard|activation_transfer"
+
+# Key metrics to monitor:
+# - sharded_inference_latency_seconds
+# - activation_transfer_duration_seconds
+# - activation_transfer_bytes_total
+# - shard_download_status
+```
+
+### Expected Results for Sharded Models
+
+- ✅ Model downloaded and split across 2 workers
+- ✅ Each worker uses ~50% of full model memory
+- ✅ Shard status shows "READY" for all workers
+- ✅ Inference completes successfully through pipeline
+- ✅ Latency overhead < 30% compared to non-sharded
+- ✅ Activation transfer time < 20ms per forward pass
+
+### Monitoring Sharded Models
+
+Add to Grafana dashboard:
+
+```yaml
+# Sharding panel configuration
+panels:
+  - title: "Sharded Model Status"
+    targets:
+      - expr: shard_download_status
+  
+  - title: "Activation Transfer Latency"
+    targets:
+      - expr: histogram_quantile(0.95, activation_transfer_duration_seconds)
+  
+  - title: "Sharded Inference Latency"
+    targets:
+      - expr: histogram_quantile(0.95, sharded_inference_latency_seconds)
+  
+  - title: "Memory per Shard"
+    targets:
+      - expr: shard_memory_bytes / 1024 / 1024 / 1024
+```
+
+### Troubleshooting Sharding
+
+**Issue: High activation transfer latency**
+
+```bash
+# Check network latency
+ping -c 100 <other-worker-ip>
+
+# Try faster compression
+# Edit config/coordinator.yaml:
+sharding:
+  compression: lz4  # Faster than zstd
+```
+
+**Issue: Shard download stuck**
+
+```bash
+# Check worker logs
+tail -f logs/worker-studio*.log | grep -i error
+
+# Check disk space
+df -h /Users/Shared/models
+
+# Retry download
+curl -X POST http://localhost:8000/admin/download_model \
+  -d '{"model_name": "model-name", "enable_sharding": true, "force_redownload": true}'
+```
+
+**Issue: One shard offline**
+
+```bash
+# Check shard health
+curl http://localhost:8000/health?include_sharded_models=true
+
+# Restart offline worker
+./scripts/stop_worker.sh --worker-id worker-studio2
+./scripts/start_worker_macos.sh --worker-id worker-studio2
+```
+
+For detailed sharding documentation, see [AUTOMATIC_SHARDING_GUIDE.md](AUTOMATIC_SHARDING_GUIDE.md).
 
 ---
 

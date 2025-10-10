@@ -114,6 +114,7 @@ class TestAuthentication:
         
         self.mock_request = Mock()
         self.mock_request.client.host = "127.0.0.1"
+        self.mock_request.headers.get.return_value = "test-user-agent"
     
     @patch.dict('os.environ', {'ENABLE_AUTH': 'false'})
     def test_verify_api_key_disabled(self):

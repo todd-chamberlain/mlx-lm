@@ -221,6 +221,46 @@ GC_COUNT = Gauge(
     ['generation']
 )
 
+# Sharding metrics
+SHARD_LAYER_RANGE = Info(
+    'worker_shard_layer_range',
+    'Layer range assigned to this worker for sharded models'
+)
+
+PIPELINE_STAGE_LATENCY = Histogram(
+    'worker_pipeline_stage_latency_seconds',
+    'Latency for processing a pipeline stage (assigned layers)',
+    ['model', 'stage'],
+    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0]
+)
+
+ACTIVATION_TRANSFER_SIZE = Histogram(
+    'worker_activation_transfer_size_bytes',
+    'Size of activation transfers in bytes',
+    ['model', 'direction'],  # direction: send or receive
+    buckets=[1024, 10240, 102400, 1048576, 10485760, 104857600, 1073741824]  # 1KB to 1GB
+)
+
+ACTIVATION_TRANSFER_TIME = Histogram(
+    'worker_activation_transfer_time_seconds',
+    'Time taken for activation transfers',
+    ['model', 'direction', 'compression'],  # compression: zstd, lz4, none
+    buckets=[0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0]
+)
+
+ACTIVATION_COMPRESSION_RATIO = Histogram(
+    'worker_activation_compression_ratio',
+    'Compression ratio for activations (original_size / compressed_size)',
+    ['model', 'compression'],
+    buckets=[1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0]
+)
+
+SHARD_MEMORY_USAGE = Gauge(
+    'worker_shard_memory_usage_bytes',
+    'Memory usage for sharded model layers',
+    ['model', 'layer_range']
+)
+
 # Application info
 APP_INFO = Info(
     'worker_info',
@@ -363,6 +403,68 @@ class WorkerMetrics:
         # Update current counts for each generation
         for gen, value in enumerate(counts):
             GC_COUNT.labels(generation=str(gen)).set(value)
+    
+    def set_shard_layer_range(self, model: str, start_layer: int, end_layer: int):
+        """Set the layer range for a sharded model."""
+        SHARD_LAYER_RANGE.info({
+            'model': model,
+            'start_layer': str(start_layer),
+            'end_layer': str(end_layer),
+            'layer_count': str(end_layer - start_layer),
+            'worker_id': self.worker_id
+        })
+    
+    def record_pipeline_stage_latency(self, model: str, stage: str, duration: float):
+        """
+        Record latency for a pipeline stage.
+        
+        Args:
+            model: Model name
+            stage: Stage name (e.g., 'forward', 'send_activations', 'receive_activations')
+            duration: Duration in seconds
+        """
+        PIPELINE_STAGE_LATENCY.labels(model=model, stage=stage).observe(duration)
+    
+    def record_activation_transfer(self, model: str, direction: str, 
+                                  size_bytes: int, duration: float,
+                                  compression: str = 'none',
+                                  original_size: Optional[int] = None):
+        """
+        Record activation transfer metrics.
+        
+        Args:
+            model: Model name
+            direction: 'send' or 'receive'
+            size_bytes: Size of transferred data in bytes
+            duration: Transfer duration in seconds
+            compression: Compression algorithm used ('zstd', 'lz4', 'none')
+            original_size: Original size before compression (for compression ratio)
+        """
+        ACTIVATION_TRANSFER_SIZE.labels(model=model, direction=direction).observe(size_bytes)
+        ACTIVATION_TRANSFER_TIME.labels(
+            model=model,
+            direction=direction,
+            compression=compression
+        ).observe(duration)
+        
+        # Record compression ratio if applicable
+        if compression != 'none' and original_size and original_size > 0:
+            compression_ratio = original_size / size_bytes
+            ACTIVATION_COMPRESSION_RATIO.labels(
+                model=model,
+                compression=compression
+            ).observe(compression_ratio)
+    
+    def update_shard_memory_usage(self, model: str, layer_range: str, memory_bytes: int):
+        """
+        Update memory usage for a sharded model.
+        
+        Args:
+            model: Model name
+            layer_range: Layer range (e.g., "0-60")
+            memory_bytes: Memory usage in bytes
+        """
+        SHARD_MEMORY_USAGE.labels(model=model, layer_range=layer_range).set(memory_bytes)
 
 # Global metrics collector instance (will be initialized with worker_id)
 worker_metrics: Optional[WorkerMetrics] = None

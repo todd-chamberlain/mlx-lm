@@ -13,6 +13,7 @@ import grpc
 
 from proto.inference_pb2 import InferenceRequest, InferenceResponse, StreamChunk, Empty
 from proto.inference_pb2_grpc import InferenceServiceStub
+import grpc.aio
 from proto.grpc_base import GRPCClientBase, RetryConfig
 from proto.errors import MLXError, MLXErrorCode
 
@@ -168,7 +169,7 @@ class WorkerClient:
         if not self.circuit_breaker.can_execute():
             raise MLXError(
                 message=f"Circuit breaker open for worker {self.worker_info.worker_id}",
-                error_code=MLXErrorCode.UNAVAILABLE
+                error_code=MLXErrorCode.WORKER_UNAVAILABLE
             )
         
         try:
@@ -233,12 +234,14 @@ class RequestRouter:
         worker_pool: WorkerPool,
         max_concurrent_requests: int = 1000,
         default_timeout: float = 30.0,
-        default_max_retries: int = 3
+        default_max_retries: int = 3,
+        sharding_coordinator: Optional[Any] = None
     ):
         self.worker_pool = worker_pool
         self.max_concurrent_requests = max_concurrent_requests
         self.default_timeout = default_timeout
         self.default_max_retries = default_max_retries
+        self.sharding_coordinator = sharding_coordinator
         
         # Request tracking
         self._active_requests: Dict[str, RequestTracker] = {}
@@ -250,6 +253,10 @@ class RequestRouter:
         
         # Concurrency control
         self._request_semaphore = asyncio.Semaphore(max_concurrent_requests)
+        
+        # Sharded inference metrics
+        self._sharded_inference_count = 0
+        self._sharded_inference_latencies: List[float] = []
         
         logger.info(f"RequestRouter initialized with max {max_concurrent_requests} concurrent requests")
     
@@ -364,6 +371,10 @@ class RequestRouter:
         tracker: RequestTracker
     ) -> InferenceResponse:
         """Route request with retry logic."""
+        # Check if model is sharded
+        if self.sharding_coordinator and self.sharding_coordinator.is_model_sharded(request.model):
+            return await self._route_sharded_inference(request, tracker)
+        
         last_error = None
         
         for attempt in range(tracker.context.max_retries + 1):
@@ -373,7 +384,7 @@ class RequestRouter:
                 if not worker:
                     raise MLXError(
                         message="No available workers",
-                        error_code=MLXErrorCode.UNAVAILABLE
+                        error_code=MLXErrorCode.WORKER_UNAVAILABLE
                     )
                 
                 tracker.selected_worker = worker.worker_id
@@ -407,11 +418,13 @@ class RequestRouter:
                     return response
                     
                 except Exception as e:
-                    # Record failure
+                    # Only record failure on final attempt to avoid opening circuit breaker on retries
                     latency_ms = (time.time() - start_time) * 1000
-                    self.worker_pool.record_request_complete(
-                        worker.worker_id, success=False, latency_ms=latency_ms
-                    )
+                    is_final_attempt = (attempt == tracker.context.max_retries)
+                    if is_final_attempt:
+                        self.worker_pool.record_request_complete(
+                            worker.worker_id, success=False, latency_ms=latency_ms
+                        )
                     raise
                 
             except Exception as e:
@@ -423,9 +436,8 @@ class RequestRouter:
                 
                 # Don't retry on certain errors
                 if isinstance(e, MLXError) and e.error_code in [
-                    MLXErrorCode.INVALID_ARGUMENT,
-                    MLXErrorCode.PERMISSION_DENIED,
-                    MLXErrorCode.UNAUTHENTICATED
+                    MLXErrorCode.INVALID_REQUEST,
+                    MLXErrorCode.AUTHENTICATION_FAILED
                 ]:
                     break
                 
@@ -440,7 +452,7 @@ class RequestRouter:
         else:
             raise MLXError(
                 message=f"Request failed after {tracker.context.max_retries + 1} attempts: {str(last_error)}",
-                error_code=MLXErrorCode.INTERNAL
+                error_code=MLXErrorCode.INFERENCE_FAILED
             )
     
     async def _stream_with_retries(
@@ -449,13 +461,19 @@ class RequestRouter:
         tracker: RequestTracker
     ) -> AsyncIterator[StreamChunk]:
         """Stream request with retry logic."""
+        # Check if model is sharded
+        if self.sharding_coordinator and self.sharding_coordinator.is_model_sharded(request.model):
+            async for chunk in self._stream_sharded_inference(request, tracker):
+                yield chunk
+            return
+        
         # For streaming, we typically don't retry as the stream may have already started
         # Select worker
         worker = self._select_worker_for_request(request, tracker)
         if not worker:
             raise MLXError(
                 message="No available workers",
-                error_code=MLXErrorCode.UNAVAILABLE
+                error_code=MLXErrorCode.WORKER_UNAVAILABLE
             )
         
         tracker.selected_worker = worker.worker_id
@@ -518,17 +536,11 @@ class RequestRouter:
     
     async def _get_worker_client(self, worker: WorkerInfo) -> WorkerClient:
         """Get or create worker client."""
-        if worker.worker_id not in self._worker_clients:
-            self._worker_clients[worker.worker_id] = WorkerClient(worker)
-        
-        client = self._worker_clients[worker.worker_id]
-        
-        # Update worker info if changed
-        if client.worker_info.address != worker.address:
-            await client.close()
-            client = WorkerClient(worker)
-            self._worker_clients[worker.worker_id] = client
-        
+        # CRITICAL: Always create fresh client to avoid async gRPC event loop issues
+        # Caching clients causes "Task got Future attached to a different loop" errors
+        # This is less efficient but ensures correctness
+        client = WorkerClient(worker)
+        await client.connect()
         return client
     
     def _cleanup_request(self, tracker: RequestTracker) -> None:
@@ -573,14 +585,261 @@ class RequestRouter:
             if completed_requests else 0.0
         )
         
+        # Calculate sharded inference metrics
+        avg_sharded_latency = 0.0
+        if self._sharded_inference_latencies:
+            avg_sharded_latency = sum(self._sharded_inference_latencies) / len(self._sharded_inference_latencies)
+        
         return {
             'active_requests': active_count,
             'total_processed': total_processed,
             'success_rate': success_rate,
             'average_latency_seconds': avg_latency,
             'worker_clients': len(self._worker_clients),
-            'max_concurrent': self.max_concurrent_requests
+            'max_concurrent': self.max_concurrent_requests,
+            'sharded_inference_count': self._sharded_inference_count,
+            'average_sharded_latency_seconds': avg_sharded_latency
         }
+    
+    async def _route_sharded_inference(
+        self,
+        request: InferenceRequest,
+        tracker: RequestTracker
+    ) -> InferenceResponse:
+        """
+        Route inference request for sharded model to first worker in pipeline.
+        
+        Args:
+            request: Inference request
+            tracker: Request tracker
+            
+        Returns:
+            InferenceResponse from distributed pipeline
+        """
+        if not self.sharding_coordinator:
+            raise MLXError(
+                message="Sharding coordinator not available",
+                error_code=MLXErrorCode.INTERNAL_ERROR
+            )
+        
+        # ============================================================
+        # SHARD METADATA USAGE: Request Routing
+        # ============================================================
+        # For sharded models, we need to route the request to the first
+        # worker in the pipeline (the worker handling layer 0).
+        #
+        # The shard metadata contains:
+        # - shard_assignments: Map of worker_id -> LayerAssignment
+        # - status: Overall model status (READY, DOWNLOADING, etc.)
+        #
+        # We find the first worker by looking for the assignment with
+        # start_layer == 0. This worker will initiate the distributed
+        # inference pipeline and coordinate with subsequent workers.
+        # ============================================================
+        
+        # Get shard metadata
+        shard_metadata = self.sharding_coordinator.get_shard_metadata(request.model)
+        if not shard_metadata:
+            raise MLXError(
+                message=f"No shard metadata found for model {request.model}",
+                error_code=MLXErrorCode.MODEL_NOT_FOUND
+            )
+        
+        # Check if model is ready
+        from coordinator.sharding_coordinator import ShardStatus
+        if shard_metadata.status != ShardStatus.READY:
+            raise MLXError(
+                message=f"Sharded model {request.model} not ready: {shard_metadata.status.value}",
+                error_code=MLXErrorCode.MODEL_NOT_LOADED
+            )
+        
+        # Find first worker in pipeline (worker with layer 0)
+        first_worker_id = None
+        for worker_id, assignment in shard_metadata.shard_assignments.items():
+            if assignment.start_layer == 0:
+                first_worker_id = worker_id
+                break
+        
+        if not first_worker_id:
+            raise MLXError(
+                message=f"No first worker found for sharded model {request.model}",
+                error_code=MLXErrorCode.INTERNAL_ERROR
+            )
+        
+        # Get worker info
+        worker = self.worker_pool.get_worker(first_worker_id)
+        if not worker:
+            raise MLXError(
+                message=f"First worker {first_worker_id} not available",
+                error_code=MLXErrorCode.WORKER_UNAVAILABLE
+            )
+        
+        logger.info(
+            f"Routing sharded inference request {request.request_id} "
+            f"for model {request.model} to first worker {first_worker_id}"
+        )
+        
+        tracker.selected_worker = first_worker_id
+        tracker.attempted_workers.add(first_worker_id)
+        tracker.status = RequestStatus.PROCESSING
+        
+        # Record request start
+        self.worker_pool.record_request_start(first_worker_id)
+        
+        try:
+            # Get or create worker client
+            client = await self._get_worker_client(worker)
+            
+            # Process request through pipeline
+            start_time = time.time()
+            response = await asyncio.wait_for(
+                client.process_inference(request),
+                timeout=tracker.context.timeout
+            )
+            
+            # Record success
+            latency_ms = (time.time() - start_time) * 1000
+            self.worker_pool.record_request_complete(
+                first_worker_id, success=True, latency_ms=latency_ms
+            )
+            
+            # Track sharded inference metrics
+            self._sharded_inference_count += 1
+            self._sharded_inference_latencies.append(latency_ms / 1000.0)
+            # Keep only recent latencies
+            if len(self._sharded_inference_latencies) > 100:
+                self._sharded_inference_latencies.pop(0)
+            
+            # Add worker ID to response
+            response.worker_id = first_worker_id
+            response.latency_ms = latency_ms
+            
+            logger.info(
+                f"Sharded inference request {request.request_id} completed "
+                f"in {latency_ms:.2f}ms"
+            )
+            
+            return response
+            
+        except Exception as e:
+            # Record failure
+            latency_ms = (time.time() - start_time) * 1000
+            self.worker_pool.record_request_complete(
+                first_worker_id, success=False, latency_ms=latency_ms
+            )
+            
+            logger.error(f"Sharded inference request {request.request_id} failed: {e}")
+            raise
+    
+    async def _stream_sharded_inference(
+        self,
+        request: InferenceRequest,
+        tracker: RequestTracker
+    ) -> AsyncIterator[StreamChunk]:
+        """
+        Route streaming inference request for sharded model to first worker in pipeline.
+        
+        Args:
+            request: Inference request
+            tracker: Request tracker
+            
+        Yields:
+            StreamChunk objects from distributed pipeline
+        """
+        if not self.sharding_coordinator:
+            raise MLXError(
+                message="Sharding coordinator not available",
+                error_code=MLXErrorCode.INTERNAL_ERROR
+            )
+        
+        # Get shard metadata
+        shard_metadata = self.sharding_coordinator.get_shard_metadata(request.model)
+        if not shard_metadata:
+            raise MLXError(
+                message=f"No shard metadata found for model {request.model}",
+                error_code=MLXErrorCode.MODEL_NOT_FOUND
+            )
+        
+        # Check if model is ready
+        from coordinator.sharding_coordinator import ShardStatus
+        if shard_metadata.status != ShardStatus.READY:
+            raise MLXError(
+                message=f"Sharded model {request.model} not ready: {shard_metadata.status.value}",
+                error_code=MLXErrorCode.MODEL_NOT_LOADED
+            )
+        
+        # Find first worker in pipeline
+        first_worker_id = None
+        for worker_id, assignment in shard_metadata.shard_assignments.items():
+            if assignment.start_layer == 0:
+                first_worker_id = worker_id
+                break
+        
+        if not first_worker_id:
+            raise MLXError(
+                message=f"No first worker found for sharded model {request.model}",
+                error_code=MLXErrorCode.INTERNAL_ERROR
+            )
+        
+        # Get worker info
+        worker = self.worker_pool.get_worker(first_worker_id)
+        if not worker:
+            raise MLXError(
+                message=f"First worker {first_worker_id} not available",
+                error_code=MLXErrorCode.WORKER_UNAVAILABLE
+            )
+        
+        logger.info(
+            f"Routing sharded streaming inference request {request.request_id} "
+            f"for model {request.model} to first worker {first_worker_id}"
+        )
+        
+        tracker.selected_worker = first_worker_id
+        tracker.attempted_workers.add(first_worker_id)
+        tracker.status = RequestStatus.PROCESSING
+        
+        # Record request start
+        self.worker_pool.record_request_start(first_worker_id)
+        
+        try:
+            # Get or create worker client
+            client = await self._get_worker_client(worker)
+            
+            # Process streaming request through pipeline
+            start_time = time.time()
+            chunk_count = 0
+            
+            async for chunk in client.stream_inference(request):
+                chunk.worker_id = first_worker_id
+                chunk_count += 1
+                yield chunk
+            
+            # Record success
+            latency_ms = (time.time() - start_time) * 1000
+            self.worker_pool.record_request_complete(
+                first_worker_id, success=True, latency_ms=latency_ms
+            )
+            
+            # Track sharded inference metrics
+            self._sharded_inference_count += 1
+            self._sharded_inference_latencies.append(latency_ms / 1000.0)
+            if len(self._sharded_inference_latencies) > 100:
+                self._sharded_inference_latencies.pop(0)
+            
+            logger.info(
+                f"Sharded streaming inference request {request.request_id} completed "
+                f"with {chunk_count} chunks in {latency_ms:.2f}ms"
+            )
+            
+        except Exception as e:
+            # Record failure
+            latency_ms = (time.time() - start_time) * 1000
+            self.worker_pool.record_request_complete(
+                first_worker_id, success=False, latency_ms=latency_ms
+            )
+            
+            logger.error(f"Sharded streaming inference request {request.request_id} failed: {e}")
+            raise
     
     async def cleanup_worker_clients(self) -> None:
         """Cleanup inactive worker clients."""

@@ -3,10 +3,13 @@ Data models for the coordinator service.
 """
 
 import time
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 from enum import Enum
 import threading
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -162,22 +165,40 @@ class WorkerInfo:
             # Update metrics from heartbeat
             if heartbeat_request.metrics:
                 self.metrics.update_from_proto(heartbeat_request.metrics)
+            
+            # Update supported models from heartbeat
+            if hasattr(heartbeat_request, 'supported_models'):
+                logger.info(f"Heartbeat has supported_models: {list(heartbeat_request.supported_models)}")
+                if heartbeat_request.supported_models:
+                    old_models = set(self.supported_models)
+                    new_models = set(heartbeat_request.supported_models)
+                    logger.info(f"Old models: {old_models}, New models: {new_models}")
+                    if old_models != new_models:
+                        self.supported_models = list(heartbeat_request.supported_models)
+                        logger.info(f"Worker {self.worker_id} updated supported models: {self.supported_models}")
+            else:
+                logger.info(f"Heartbeat does not have supported_models attribute")
     
     def is_healthy(self, heartbeat_timeout: float = 30.0) -> bool:
         """Check if worker is considered healthy."""
         with self._lock:
             # Check heartbeat timeout
-            if time.time() - self.last_heartbeat > heartbeat_timeout:
+            time_since_heartbeat = time.time() - self.last_heartbeat
+            if time_since_heartbeat > heartbeat_timeout:
+                logger.info(f"[HEALTH] Worker {self.worker_id} unhealthy: heartbeat timeout ({time_since_heartbeat:.1f}s > {heartbeat_timeout}s)")
                 return False
             
             # Check status
             if self.status not in [WorkerStatus.HEALTHY]:
+                logger.info(f"[HEALTH] Worker {self.worker_id} unhealthy: status is {self.status.value}")
                 return False
             
             # Check circuit breaker
             if self.circuit_breaker_open:
+                logger.info(f"[HEALTH] Worker {self.worker_id} unhealthy: circuit breaker open (failures: {self.consecutive_failures})")
                 return False
             
+            logger.info(f"[HEALTH] Worker {self.worker_id} is healthy (status={self.status.value}, load={self.current_load}/{self.max_concurrent})")
             return True
     
     def is_available_for_request(self) -> bool:

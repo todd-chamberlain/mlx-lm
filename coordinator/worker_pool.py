@@ -27,8 +27,8 @@ class WorkerPool:
         heartbeat_timeout: float = 30.0,
         cleanup_interval: float = 60.0,
         max_workers: int = 100,
-        circuit_breaker_failure_threshold: int = 5,
-        circuit_breaker_recovery_timeout: float = 60.0,
+        circuit_breaker_failure_threshold: int = 10,  # Increased from 5 to 10
+        circuit_breaker_recovery_timeout: float = 15.0,  # Reduced from 60 to 15 seconds
         selection_config: Optional[SelectionConfig] = None,
         health_thresholds: Optional[HealthThresholds] = None,
         health_check_interval: float = 10.0
@@ -99,19 +99,19 @@ class WorkerPool:
         if not worker_id:
             raise MLXError(
                 message="Worker ID is required",
-                error_code=MLXErrorCode.INVALID_ARGUMENT
+                error_code=MLXErrorCode.INVALID_REQUEST
             )
         
         if not registration.address:
             raise MLXError(
                 message="Worker address is required",
-                error_code=MLXErrorCode.INVALID_ARGUMENT
+                error_code=MLXErrorCode.INVALID_REQUEST
             )
         
         if registration.max_concurrent <= 0:
             raise MLXError(
                 message="max_concurrent must be positive",
-                error_code=MLXErrorCode.INVALID_ARGUMENT
+                error_code=MLXErrorCode.INVALID_REQUEST
             )
         
         with self._lock:
@@ -275,12 +275,17 @@ class WorkerPool:
         """Get workers that support a specific model."""
         with self._lock:
             worker_ids = self._workers_by_model.get(model, set())
+            logger.info(f"[ROUTING] _workers_by_model['{model}'] = {worker_ids}")
+            logger.info(f"[ROUTING] All models in _workers_by_model: {list(self._workers_by_model.keys())}")
             return [self._workers[worker_id] for worker_id in worker_ids if worker_id in self._workers]
     
     def get_available_workers_for_model(self, model: str) -> List[WorkerInfo]:
         """Get available workers that support a specific model."""
         workers = self.get_workers_for_model(model)
-        return [worker for worker in workers if worker.is_available_for_request()]
+        logger.info(f"[ROUTING] get_workers_for_model('{model}') returned {len(workers)} workers")
+        available = [worker for worker in workers if worker.is_available_for_request()]
+        logger.info(f"[ROUTING] {len(available)} of {len(workers)} workers are available for requests")
+        return available
     
     def get_pool_stats(self) -> Dict[str, Any]:
         """Get pool statistics."""

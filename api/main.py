@@ -22,7 +22,11 @@ from .models import (
     ChatCompletionStreamResponse,
     HealthResponse,
     ModelsResponse,
-    ErrorResponse
+    ErrorResponse,
+    ModelDownloadRequest,
+    ModelDownloadResponse,
+    ShardStatusResponse,
+    WorkerShardStatus
 )
 from .coordinator_client import CoordinatorClient
 from .auth import verify_api_key
@@ -81,16 +85,55 @@ security = HTTPBearer(auto_error=False)
 
 def get_coordinator_client() -> CoordinatorClient:
     """Get the global coordinator client."""
+    logger.info("get_coordinator_client called")
     if coordinator_client is None:
+        logger.error("Coordinator client is None!")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Coordinator client not initialized"
         )
+    logger.info(f"Returning coordinator client: {coordinator_client}")
     return coordinator_client
 
 
-@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-@limiter.limit("100/minute")  # 100 requests per minute per client
+@app.post("/v1/test_simple")
+async def test_simple_post(request: Request):
+    """Minimal test endpoint."""
+    from fastapi.responses import JSONResponse
+    logger.info("test_simple_post called")
+    return JSONResponse(content={"status": "ok", "test": "simple"})
+
+@app.post("/v1/test_with_model")
+async def test_with_model(chat_request: ChatCompletionRequest):
+    """Test with Pydantic model."""
+    from fastapi.responses import JSONResponse
+    logger.info(f"test_with_model called with: {chat_request}")
+    return JSONResponse(content={"status": "ok", "model": chat_request.model})
+
+@app.post("/v1/test_with_coordinator")
+async def test_with_coordinator(
+    chat_request: ChatCompletionRequest,
+    coordinator: CoordinatorClient = Depends(get_coordinator_client)
+):
+    """Test with coordinator dependency."""
+    from fastapi.responses import JSONResponse
+    logger.info(f"test_with_coordinator called")
+    return JSONResponse(content={"status": "ok", "has_coordinator": coordinator is not None})
+
+@app.post("/v1/test_inference")
+async def test_inference(
+    chat_request: ChatCompletionRequest,
+    coordinator: CoordinatorClient = Depends(get_coordinator_client)
+):
+    """Test actual inference call."""
+    from fastapi.responses import JSONResponse
+    logger.info(f"test_inference: calling coordinator.route_inference")
+    response = await coordinator.route_inference(chat_request)
+    logger.info(f"test_inference: got response type={type(response)}")
+    return JSONResponse(content=response.model_dump())
+
+@app.post("/v1/chat/completions")
+# @limiter.limit("100/minute")  # 100 requests per minute per client
 async def create_chat_completion(
     chat_request: ChatCompletionRequest,
     request: Request,
@@ -118,7 +161,9 @@ async def create_chat_completion(
     
     # Handle non-streaming requests
     try:
+        logger.info(f"Routing inference request for model: {chat_request.model}")
         response = await coordinator.route_inference(chat_request)
+        logger.info(f"Got response type: {type(response)}, value: {response}")
         
         # Log successful request
         duration_ms = (time.time() - start_time) * 1000
@@ -127,11 +172,18 @@ async def create_chat_completion(
             credentials,
             request_data=chat_request.model_dump(),
             response_status=200,
-            response_data=response.model_dump(),
+            response_data=response.model_dump() if hasattr(response, 'model_dump') else response,
             duration_ms=duration_ms
         )
         
-        return response
+        # Return as JSON response
+        from fastapi.responses import JSONResponse
+        if isinstance(response, dict):
+            logger.warning("Response is a dict, wrapping in JSONResponse")
+            return JSONResponse(content=response)
+        else:
+            logger.info("Response is a Pydantic model, converting to dict")
+            return JSONResponse(content=response.model_dump())
     except Exception as e:
         # Log failed request
         duration_ms = (time.time() - start_time) * 1000
@@ -231,18 +283,51 @@ async def stream_chat_completion(
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check(
+    include_sharded_models: bool = False,
     coordinator: CoordinatorClient = Depends(get_coordinator_client)
 ):
-    """Get system health status."""
+    """
+    Get system health status.
+    
+    Args:
+        include_sharded_models: Include detailed health info for sharded models
+    """
     try:
-        health_info = await coordinator.get_health()
-        return HealthResponse(
+        health_info = await coordinator.get_health(include_sharded_models=include_sharded_models)
+        
+        # Build response
+        response = HealthResponse(
             status="healthy" if health_info.healthy_workers > 0 else "unhealthy",
             total_workers=health_info.total_workers,
             healthy_workers=health_info.healthy_workers,
             active_requests=health_info.active_requests,
             timestamp=int(time.time())
         )
+        
+        # Add sharded model information if available
+        if hasattr(health_info, 'sharded_models') and health_info.sharded_models:
+            from .models import ShardedModelHealth
+            
+            response.sharded_model_count = len(health_info.sharded_models)
+            response.sharded_models = [
+                ShardedModelHealth(
+                    model_name=sm.model_name,
+                    total_shards=sm.total_shards,
+                    healthy_shards=sm.healthy_shards,
+                    status=sm.status
+                )
+                for sm in health_info.sharded_models
+            ]
+            
+            # Adjust overall status if any sharded models are degraded
+            if any(sm.status == "degraded" for sm in health_info.sharded_models):
+                response.status = "degraded"
+            elif any(sm.status == "offline" for sm in health_info.sharded_models):
+                if response.status == "healthy":
+                    response.status = "degraded"
+        
+        return response
+        
     except Exception as e:
         return HealthResponse(
             status="unhealthy",
@@ -294,22 +379,67 @@ async def list_models(
         )
 
 
-@app.post("/admin/download_model")
+@app.post("/admin/download_model", response_model=None)
 @limiter.limit("10/minute")
 async def download_model(
-    model_name: str,
+    download_request: "ModelDownloadRequest",
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     coordinator: CoordinatorClient = Depends(get_coordinator_client)
 ):
-    """Download a model in the background without interrupting service."""
+    """
+    Download a model in the background without interrupting service.
+    
+    Supports automatic sharding across workers when enable_sharding is True.
+    Requires at least 2 workers for sharding to be enabled.
+    """
     # Verify authentication
     if os.getenv("ENABLE_AUTH", "false").lower() == "true":
         verify_api_key(credentials, request)
     
     try:
-        result = await coordinator.download_model(model_name)
-        return result
+        # Validate minimum worker count if sharding is enabled
+        if download_request.enable_sharding:
+            health_info = await coordinator.get_health()
+            if health_info.healthy_workers < 2:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Sharding requires at least 2 workers, but only {health_info.healthy_workers} available"
+                )
+        
+        result = await coordinator.download_model(
+            download_request.model_name,
+            enable_sharding=download_request.enable_sharding,
+            force_redownload=download_request.force_redownload
+        )
+        
+        # Convert to response model
+        from .models import ModelDownloadResponse, ShardPlan, LayerAssignmentInfo
+        
+        response = ModelDownloadResponse(
+            success=result['success'],
+            message=result['message'],
+            download_id=result['download_id'],
+            workers_notified=result['workers_notified'],
+            is_sharded=result.get('is_sharded', False)
+        )
+        
+        # Add shard plan if available
+        if result.get('shard_plan'):
+            shard_plan_data = result['shard_plan']
+            response.shard_plan = ShardPlan(
+                model_name=shard_plan_data['model_name'],
+                total_layers=shard_plan_data['total_layers'],
+                assignments=[
+                    LayerAssignmentInfo(**assignment)
+                    for assignment in shard_plan_data['assignments']
+                ]
+            )
+        
+        return response
+        
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -333,12 +463,55 @@ async def download_status(
         )
 
 
+@app.get("/admin/models/{model_name}/shards", response_model=ShardStatusResponse)
+async def get_model_shards(
+    model_name: str,
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    coordinator: CoordinatorClient = Depends(get_coordinator_client)
+):
+    """
+    Get shard status for a model.
+    
+    Returns shard assignments per worker, download/load status per shard,
+    and inference metrics for sharded models.
+    """
+    # Verify authentication if enabled
+    if os.getenv("ENABLE_AUTH", "false").lower() == "true":
+        verify_api_key(credentials, request)
+    
+    try:
+        result = await coordinator.get_shard_status(model_name)
+        
+        # Convert to response model
+        response = ShardStatusResponse(
+            model_name=result['model_name'],
+            is_sharded=result['is_sharded'],
+            total_layers=result['total_layers'],
+            shard_assignments=[
+                WorkerShardStatus(**shard)
+                for shard in result['shard_assignments']
+            ],
+            overall_status=result['overall_status'],
+            inference_count=result.get('inference_count'),
+            avg_latency_ms=result.get('avg_latency_ms')
+        )
+        
+        return response
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get shard status: {str(e)}"
+        )
+
+
 @app.post("/admin/load_model")
 @limiter.limit("5/minute")
 async def load_model(
     model_name: str,
-    drain_timeout: int = 30,
     request: Request,
+    drain_timeout: int = 30,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     coordinator: CoordinatorClient = Depends(get_coordinator_client)
 ):

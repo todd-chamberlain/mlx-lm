@@ -676,6 +676,234 @@ top -l 1 | grep -E "CPU|PhysMem"
 
 ---
 
+## Automatic Model Sharding
+
+### Overview
+
+Automatic model sharding distributes large models across multiple workers, reducing per-node memory usage by ~50%. This enables running models larger than single-machine capacity.
+
+### When to Use Sharding
+
+- Model size exceeds single-node memory (70B+ parameters)
+- You have 2+ workers available
+- Network latency between workers is < 10ms
+
+### Download Model with Sharding
+
+**Endpoint:** `POST /admin/download_model`
+
+**Request:**
+```bash
+curl -X POST http://localhost:8000/admin/download_model \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-api-key" \
+  -d '{
+    "model_name": "meta-llama/Llama-2-70b-chat-hf",
+    "enable_sharding": true,
+    "force_redownload": false
+  }'
+```
+
+**Parameters:**
+- `model_name` (required): HuggingFace model identifier
+- `enable_sharding` (optional): Enable automatic sharding (default: false)
+- `force_redownload` (optional): Force re-download if model exists (default: false)
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Sharded download initiated across 2 workers",
+  "download_id": "dl-abc123",
+  "workers_notified": 2,
+  "is_sharded": true,
+  "shard_plan": {
+    "model_name": "meta-llama/Llama-2-70b-chat-hf",
+    "total_layers": 80,
+    "assignments": [
+      {
+        "worker_id": "worker-studio1",
+        "start_layer": 0,
+        "end_layer": 40,
+        "next_worker_id": "worker-studio2"
+      },
+      {
+        "worker_id": "worker-studio2",
+        "start_layer": 40,
+        "end_layer": 80,
+        "next_worker_id": null
+      }
+    ]
+  }
+}
+```
+
+### Check Shard Status
+
+**Endpoint:** `GET /admin/models/{model_name}/shards`
+
+**Request:**
+```bash
+curl http://localhost:8000/admin/models/meta-llama/Llama-2-70b-chat-hf/shards
+```
+
+**Response:**
+```json
+{
+  "model_name": "meta-llama/Llama-2-70b-chat-hf",
+  "is_sharded": true,
+  "total_layers": 80,
+  "shard_assignments": [
+    {
+      "worker_id": "worker-studio1",
+      "start_layer": 0,
+      "end_layer": 40,
+      "status": "READY",
+      "progress_percent": 100.0,
+      "error": null
+    },
+    {
+      "worker_id": "worker-studio2",
+      "start_layer": 40,
+      "end_layer": 80,
+      "status": "READY",
+      "progress_percent": 100.0,
+      "error": null
+    }
+  ],
+  "overall_status": "READY",
+  "inference_count": 156,
+  "avg_latency_ms": 142.3
+}
+```
+
+**Status Values:**
+- `DOWNLOADING`: Download in progress
+- `READY`: Shard loaded and ready for inference
+- `FAILED`: Download or loading failed
+- `UNLOADING`: Shard being unloaded
+
+### Health Check with Sharded Models
+
+**Endpoint:** `GET /health?include_sharded_models=true`
+
+**Request:**
+```bash
+curl "http://localhost:8000/health?include_sharded_models=true"
+```
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "total_workers": 2,
+  "healthy_workers": 2,
+  "active_requests": 3,
+  "timestamp": 1704067200,
+  "sharded_model_count": 1,
+  "sharded_models": [
+    {
+      "model_name": "meta-llama/Llama-2-70b-chat-hf",
+      "total_shards": 2,
+      "healthy_shards": 2,
+      "status": "ready"
+    }
+  ]
+}
+```
+
+### Inference with Sharded Models
+
+Inference works identically for sharded and non-sharded models:
+
+```bash
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-api-key" \
+  -d '{
+    "model": "meta-llama/Llama-2-70b-chat-hf",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 100
+  }'
+```
+
+The system automatically routes sharded models through the pipeline inference path.
+
+### Delete Sharded Model
+
+**Endpoint:** `DELETE /admin/models/{model_name}`
+
+Deleting a sharded model removes partial weights from all workers:
+
+```bash
+curl -X DELETE http://localhost:8000/admin/models/meta-llama/Llama-2-70b-chat-hf
+```
+
+### Python Example
+
+```python
+import requests
+import time
+
+# Download with sharding
+response = requests.post(
+    "http://localhost:8000/admin/download_model",
+    headers={"Authorization": "Bearer your-api-key"},
+    json={
+        "model_name": "meta-llama/Llama-2-70b-chat-hf",
+        "enable_sharding": True
+    }
+)
+
+print(f"Download initiated: {response.json()['download_id']}")
+
+# Monitor progress
+model_name = "meta-llama/Llama-2-70b-chat-hf"
+while True:
+    status = requests.get(
+        f"http://localhost:8000/admin/models/{model_name}/shards"
+    ).json()
+    
+    if status["overall_status"] == "READY":
+        print("Download complete!")
+        break
+    
+    print(f"Status: {status['overall_status']}")
+    time.sleep(5)
+
+# Run inference
+result = requests.post(
+    "http://localhost:8000/v1/chat/completions",
+    headers={"Authorization": "Bearer your-api-key"},
+    json={
+        "model": model_name,
+        "messages": [{"role": "user", "content": "Hello!"}]
+    }
+).json()
+
+print(result["choices"][0]["message"]["content"])
+```
+
+### Performance Characteristics
+
+**Memory Savings:**
+- Each worker uses ~50% of full model memory
+- Example: 70B model requires 30GB per worker instead of 60GB
+
+**Latency Overhead:**
+- Typical overhead: 15-30% compared to non-sharded
+- Activation transfer: ~15ms per forward pass
+- Compression overhead: ~5ms (ZSTD)
+
+**Network Requirements:**
+- Minimum: 1 Gbps
+- Recommended: 10 Gbps or Thunderbolt
+- Latency: < 10ms between workers
+
+For detailed information, see [AUTOMATIC_SHARDING_GUIDE.md](AUTOMATIC_SHARDING_GUIDE.md).
+
+---
+
 ## FAQ
 
 **Q: How many Mac Studios do I need?**
@@ -701,6 +929,15 @@ A: Currently one model per cluster. Multi-model support is on the roadmap.
 
 **Q: How do I backup/restore?**
 A: Backup `config/` and `models/` directories. Restore and restart services.
+
+**Q: What is automatic model sharding?**
+A: Sharding splits large models across workers, reducing per-node memory by ~50%. Enable with `enable_sharding: true` when downloading models. Requires 2+ workers.
+
+**Q: When should I use sharding?**
+A: Use sharding for models > 30GB that exceed single-node memory. Don't use for small models or when you need absolute minimum latency.
+
+**Q: Does sharding affect inference quality?**
+A: No! Sharding is a memory optimization. Models produce identical outputs whether sharded or not.
 
 ---
 

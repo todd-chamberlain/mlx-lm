@@ -16,8 +16,9 @@ import grpc
 from proto import distributed_pb2, distributed_pb2_grpc
 from worker.activation_transfer import ActivationTransfer
 from common.retry import retry
+from common.logging_system import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -206,9 +207,20 @@ class DistributedForwardPass:
             self.metrics.total_bytes_transferred += len(serialized.data) + len(response.output_data)
             self.metrics.total_transfers += 1
             
-            logger.debug(
-                f"Stage {node_id} completed in {stage_time:.3f}s, "
-                f"output shape: {output_activations.shape}"
+            logger.info(
+                f"Pipeline stage completed",
+                extra={
+                    "request_id": request_id,
+                    "pipeline_id": self.pipeline_id,
+                    "node_id": node_id,
+                    "start_layer": min(layer_indices),
+                    "end_layer": max(layer_indices) + 1,
+                    "layer_range": f"{min(layer_indices)}-{max(layer_indices) + 1}",
+                    "stage_time_seconds": stage_time,
+                    "output_shape": str(output_activations.shape),
+                    "bytes_transferred": len(serialized.data) + len(response.output_data),
+                    "operation": "pipeline_stage_complete"
+                }
             )
             
             return output_activations
@@ -244,8 +256,14 @@ class DistributedForwardPass:
         
         try:
             logger.info(
-                f"Starting distributed forward pass for request {request_id}, "
-                f"input shape: {input_ids.shape}"
+                f"Starting distributed forward pass",
+                extra={
+                    "request_id": request_id,
+                    "pipeline_id": self.pipeline_id,
+                    "input_shape": str(input_ids.shape),
+                    "num_stages": len(self.pipeline_stages),
+                    "operation": "pipeline_forward_start"
+                }
             )
             
             # Initialize with input embeddings
@@ -270,10 +288,16 @@ class DistributedForwardPass:
             self.metrics.total_time = time.time() - forward_start
             
             logger.info(
-                f"Distributed forward pass completed in {self.metrics.total_time:.3f}s, "
-                f"output shape: {current_activations.shape}, "
-                f"transfers: {self.metrics.total_transfers}, "
-                f"bytes: {self.metrics.total_bytes_transferred}"
+                f"Distributed forward pass completed",
+                extra={
+                    "request_id": request_id,
+                    "pipeline_id": self.pipeline_id,
+                    "total_time_seconds": self.metrics.total_time,
+                    "output_shape": str(current_activations.shape),
+                    "total_transfers": self.metrics.total_transfers,
+                    "total_bytes_transferred": self.metrics.total_bytes_transferred,
+                    "operation": "pipeline_forward_complete"
+                }
             )
             
             return current_activations
