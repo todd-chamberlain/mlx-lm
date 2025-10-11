@@ -9,7 +9,7 @@ server:
 
 # Coordinator connection
 coordinator:
-  host: "coordinator"
+  host: "localhost"
   port: 50051
   timeout: 30
   max_retries: 3

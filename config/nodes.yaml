@@ -1,0 +1,39 @@
+# Node Configuration for Distributed MLX Inference
+# Define all worker nodes in your cluster
+
+# Coordinator configuration
+coordinator:
+  host: "localhost"  # Host running Docker services
+  port: 50051
+
+# Worker nodes configuration
+workers:
+  - id: "worker-studio1"
+    host: "10.201.20.10"  # mac-studio-1
+    port: 8080
+    connection_type: "local"  # local, ssh, thunderbolt
+    # For local workers, no SSH needed
+
+  - id: "worker-studio2"
+    host: "10.201.20.12"  # mac-studio-2
+    port: 8080
+    connection_type: "ssh"
+    ssh_user: "toddchamberlain_1"
+    work_dir: "~/mlx-distributed-inference"
+
+  # Add more workers as needed:
+  # - id: "worker-studio3"
+  #   host: "10.201.20.13"
+  #   port: 8080
+  #   connection_type: "thunderbolt"  # For thunderbolt-connected nodes
+  #   ssh_user: "username"
+  #   work_dir: "~/mlx-distributed-inference"
+
+# Model paths per worker
+# Maps model names to local filesystem paths on each worker
+model_paths:
+  "qwen3-coder-480b-mlx":
+    worker-studio1: "/Volumes/thunderbay/models/qwen3-coder-480b-mlx"
+    worker-studio2: "/Volumes/models/mlx/qwen3-coder-480b-mlx"
+    # Add paths for additional workers:
+    # worker-studio3: "/Volumes/models/mlx/qwen3-coder-480b-mlx"

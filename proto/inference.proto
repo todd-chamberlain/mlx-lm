@@ -112,6 +112,7 @@ message WorkerMetrics {
 
 message HealthCheckRequest {
     bool include_workers = 1;
+    bool include_sharded_models = 2;
 }
 
 message HealthCheckResponse {
@@ -140,6 +141,9 @@ message ModelDownloadRequest {
     string model_name = 1;
     bool force_redownload = 2;
     LayerAssignment layer_assignment = 3;  // Optional: for sharded downloads
+    bool enable_sharding = 4;  // Enable automatic sharding
+    int32 num_layers = 5;  // Number of layers (for local models)
+    float model_size_gb = 6;  // Model size in GB (for local models)
 }
 
 // Layer assignment for sharded models
@@ -151,11 +155,20 @@ message LayerAssignment {
     string next_worker_address = 5;
 }
 
+// Shard plan for distributed models
+message ShardPlan {
+    string model_name = 1;
+    int32 total_layers = 2;
+    repeated LayerAssignment assignments = 3;
+}
+
 message ModelDownloadResponse {
     bool success = 1;
     string message = 2;
     string download_id = 3;
     int32 workers_notified = 4;
+    bool is_sharded = 5;
+    ShardPlan shard_plan = 6;  // Optional: shard plan if sharding is enabled
 }
 
 message ModelStatusRequest {

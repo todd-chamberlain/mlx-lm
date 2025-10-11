@@ -335,8 +335,9 @@ class CoordinatorClient:
         async def _do_health_check():
             await self._ensure_connected()
             request = HealthCheckRequest(
-                include_workers=True,
-                include_sharded_models=include_sharded_models
+                include_workers=True
+                # TODO: Re-enable when proto is properly updated
+                # include_sharded_models=include_sharded_models
             )
             return await self.stub.HealthCheck(request, timeout=10.0)
         
@@ -375,7 +376,9 @@ class CoordinatorClient:
         self, 
         model_name: str, 
         enable_sharding: bool = False,
-        force_redownload: bool = False
+        force_redownload: bool = False,
+        num_layers: Optional[int] = None,
+        model_size_gb: Optional[float] = None
     ) -> dict:
         """
         Request model download across all workers.
@@ -394,7 +397,9 @@ class CoordinatorClient:
             request = ModelDownloadRequest(
                 model_name=model_name,
                 force_redownload=force_redownload,
-                enable_sharding=enable_sharding
+                enable_sharding=enable_sharding,
+                num_layers=num_layers or 0,
+                model_size_gb=model_size_gb or 0.0
             )
             
             response = await self.stub.DownloadModel(request, timeout=10.0)

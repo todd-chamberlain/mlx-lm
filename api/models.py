@@ -151,6 +151,8 @@ class ModelDownloadRequest(BaseModel):
     model_name: str = Field(..., description="Name of the model to download")
     enable_sharding: Optional[bool] = Field(False, description="Enable automatic sharding across workers")
     force_redownload: Optional[bool] = Field(False, description="Force redownload if model exists")
+    num_layers: Optional[int] = Field(None, description="Number of layers in the model (for local models)")
+    model_size_gb: Optional[float] = Field(None, description="Model size in GB (for local models)")
 
 
 class LayerAssignmentInfo(BaseModel):

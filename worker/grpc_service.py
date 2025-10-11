@@ -225,7 +225,7 @@ class InferenceServiceImpl(InferenceServiceServicer):
             from mlx_lm import load
             import os
             from pathlib import Path
-            from .sharded_model_loader import LayerAssignment as LoaderLayerAssignment
+            from .model_partitioner import LayerAssignment as LoaderLayerAssignment
             
             logger.info(f"Model download requested: {request.model_name}")
             
@@ -268,11 +268,22 @@ class InferenceServiceImpl(InferenceServiceServicer):
                             next_worker_address=request.layer_assignment.next_worker_address if request.layer_assignment.next_worker_address else None
                         )
                         
+                        # Resolve model name to local path using registry
+                        from .model_registry import ModelRegistry
+                        registry = ModelRegistry(worker_id=self.worker_id)
+                        model_path = registry.get_model_path(request.model_name)
+
+                        if not model_path:
+                            raise RuntimeError(f"Model '{request.model_name}' not found in worker registry")
+
+                        logger.info(f"Resolved model '{request.model_name}' to path: {model_path}")
+
                         # Load sharded model
                         success = await asyncio.to_thread(
                             self.model_manager.load_sharded_model,
-                            request.model_name,
-                            layer_assignment
+                            model_path,
+                            layer_assignment,
+                            request.model_name
                         )
                         
                         if not success:

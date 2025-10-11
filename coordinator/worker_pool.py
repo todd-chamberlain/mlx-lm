@@ -219,7 +219,7 @@ class WorkerPool:
             if worker_id not in self._workers:
                 raise MLXError(
                     message=f"Worker {worker_id} not registered",
-                    error_code=MLXErrorCode.NOT_FOUND
+                    error_code=MLXErrorCode.WORKER_NOT_FOUND
                 )
             
             worker = self._workers[worker_id]

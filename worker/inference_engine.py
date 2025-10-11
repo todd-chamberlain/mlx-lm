@@ -188,7 +188,7 @@ class InferenceEngine:
         """Prepare parameters for MLX generation"""
         params = {
             'max_tokens': request.max_tokens,
-            'temp': request.temperature,
+            'temperature': request.temperature,
             'top_p': request.top_p,
         }
         

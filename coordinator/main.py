@@ -57,6 +57,12 @@ class CoordinatorApp:
                 'circuit_breaker_failure_threshold': int(os.getenv('CIRCUIT_BREAKER_FAILURE_THRESHOLD', '5')),
                 'circuit_breaker_recovery_timeout': float(os.getenv('CIRCUIT_BREAKER_RECOVERY_TIMEOUT', '60.0'))
             },
+            'sharding': {
+                'enable_auto_sharding': os.getenv('ENABLE_AUTO_SHARDING', 'false').lower() == 'true',
+                'shard_threshold_gb': float(os.getenv('SHARD_THRESHOLD_GB', '30.0')),
+                'strategy': os.getenv('SHARD_STRATEGY', 'balanced'),
+                'min_workers_for_sharding': int(os.getenv('MIN_WORKERS_FOR_SHARDING', '2'))
+            },
             'logging': {
                 'level': os.getenv('LOG_LEVEL', 'INFO'),
                 'file': os.getenv('LOG_FILE', '/tmp/coordinator.log')
@@ -72,11 +78,13 @@ class CoordinatorApp:
             server_config = self.config['server']
             worker_pool_config = self.config['worker_pool']
             metrics_config = self.config['metrics']
+            sharding_config = self.config['sharding']
             
             self.server = CoordinatorServer(
                 port=server_config['port'],
                 max_workers=server_config['max_workers'],
-                worker_pool_config=worker_pool_config
+                worker_pool_config=worker_pool_config,
+                sharding_config=sharding_config
             )
             
             # Start metrics server if enabled

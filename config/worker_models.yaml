@@ -1,0 +1,17 @@
+# Worker Model Path Configuration
+# Maps model names to their local file system paths on each worker
+
+# Model registry - maps model names to local paths
+# Each worker should have this file configured for its own filesystem
+
+models:
+  # Qwen 3 Coder 480B
+  "qwen3-coder-480b-mlx":
+    # Path on worker-studio1
+    worker-studio1: "/Volumes/thunderbay/models/qwen3-coder-480b-mlx"
+    # Path on worker-studio2
+    worker-studio2: "/Volumes/models/mlx/qwen3-coder-480b-mlx"
+
+  # Add other models here as needed
+  # "model-name":
+  #   worker-id: "/path/to/model"

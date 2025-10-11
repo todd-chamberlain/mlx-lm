@@ -149,6 +149,11 @@ class CoordinatorService(CoordinatorServiceServicer):
                         current_load=health_info.current_load
                     ))
             
+            # Handle sharded models info if requested
+            # For now, just acknowledge the field exists (implementation can be added later)
+            if hasattr(request, 'include_sharded_models'):
+                logger.debug(f"Sharded models info requested: {request.include_sharded_models}")
+            
             return HealthCheckResponse(
                 status=cluster_health.status.value,
                 total_workers=cluster_health.total_workers,
@@ -312,7 +317,7 @@ class CoordinatorService(CoordinatorServiceServicer):
     async def DownloadModel(self, request, context):
         """Coordinate model download across all workers."""
         try:
-            from proto.inference_pb2 import ModelDownloadResponse, LayerAssignmentProto
+            from proto.inference_pb2 import ModelDownloadResponse, LayerAssignment
             import uuid
             
             download_id = str(uuid.uuid4())
@@ -521,11 +526,11 @@ class CoordinatorService(CoordinatorServiceServicer):
                             
                             # Set layer assignment fields if they exist in proto
                             if hasattr(worker_request, 'layer_assignment'):
-                                layer_assignment = LayerAssignmentProto(
+                                layer_assignment = LayerAssignment(
                                     start_layer=assignment.start_layer,
                                     end_layer=assignment.end_layer,
-                                    next_worker_id=assignment.next_worker_id,
-                                    next_worker_address=assignment.next_worker_address
+                                    next_worker_id=assignment.next_node_id or "",
+                                    next_worker_address=assignment.next_node_address or ""
                                 )
                                 worker_request.layer_assignment.CopyFrom(layer_assignment)
                             
@@ -638,7 +643,8 @@ class CoordinatorService(CoordinatorServiceServicer):
                 success=workers_notified > 0,
                 message=message,
                 download_id=download_id,
-                workers_notified=workers_notified
+                workers_notified=workers_notified,
+                is_sharded=shard_metadata is not None
             )
         except Exception as e:
             logger.error(f"Error in DownloadModel: {e}", exc_info=True)

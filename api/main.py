@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
     global coordinator_client
     
     # Startup
-    coordinator_host = os.getenv("COORDINATOR_HOST", "coordinator:50051")
+    coordinator_host = os.getenv("COORDINATOR_HOST", "localhost:50051")
     coordinator_client = CoordinatorClient(coordinator_host)
     await coordinator_client.connect()
     
@@ -379,10 +379,10 @@ async def list_models(
         )
 
 
-@app.post("/admin/download_model", response_model=None)
+@app.post("/admin/download_model")
 @limiter.limit("10/minute")
 async def download_model(
-    download_request: "ModelDownloadRequest",
+    download_request: ModelDownloadRequest,
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     coordinator: CoordinatorClient = Depends(get_coordinator_client)
@@ -410,33 +410,13 @@ async def download_model(
         result = await coordinator.download_model(
             download_request.model_name,
             enable_sharding=download_request.enable_sharding,
-            force_redownload=download_request.force_redownload
+            force_redownload=download_request.force_redownload,
+            num_layers=download_request.num_layers,
+            model_size_gb=download_request.model_size_gb
         )
         
-        # Convert to response model
-        from .models import ModelDownloadResponse, ShardPlan, LayerAssignmentInfo
-        
-        response = ModelDownloadResponse(
-            success=result['success'],
-            message=result['message'],
-            download_id=result['download_id'],
-            workers_notified=result['workers_notified'],
-            is_sharded=result.get('is_sharded', False)
-        )
-        
-        # Add shard plan if available
-        if result.get('shard_plan'):
-            shard_plan_data = result['shard_plan']
-            response.shard_plan = ShardPlan(
-                model_name=shard_plan_data['model_name'],
-                total_layers=shard_plan_data['total_layers'],
-                assignments=[
-                    LayerAssignmentInfo(**assignment)
-                    for assignment in shard_plan_data['assignments']
-                ]
-            )
-        
-        return response
+        # Return result directly
+        return result
         
     except HTTPException:
         raise
