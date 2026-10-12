@@ -12,6 +12,7 @@ from unittest import mock
 import mlx.core as mx
 import requests
 
+import mlx_lm.server as server_module
 from mlx_lm.generate import TextStateMachine
 from mlx_lm.models.cache import KVCache, QuantizedKVCache
 from mlx_lm.server import (
@@ -19,6 +20,7 @@ from mlx_lm.server import (
     LRUPromptCache,
     ResponseGenerator,
     SamplingArguments,
+    TimeBudget,
     ToolCallFormatter,
     _make_sampler,
 )
@@ -231,6 +233,59 @@ class TestToolCallFormatter(unittest.TestCase):
             json.loads(tool_calls[1]["function"]["arguments"]),
             {"items": [{"name": "noodles", "organic": True}]},
         )
+
+
+class TestTimeBudget(unittest.TestCase):
+    """Distributed loop lengths: a number of steps, tuned per kind of loop."""
+
+    def setUp(self):
+        self.clock = [0.0]
+        patches = [
+            mock.patch.object(server_module.time, "time", lambda: self.clock[0]),
+            mock.patch.object(server_module.mx.distributed, "all_sum", lambda x: x),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.budget = TimeBudget()
+        self.budget._is_distributed = True
+
+    def run_loops(self, loops, *, prompting, step, sync):
+        steps = []
+        for _ in range(loops):
+            count = 0
+            for _ in self.budget(prompting):
+                self.clock[0] += step
+                count += 1
+            with self.budget.synchronizing():
+                self.clock[0] += sync
+            steps.append(count)
+        return steps
+
+    def test_generation_loops_tune_toward_the_budget(self):
+        steps = self.run_loops(20, prompting=False, step=0.05, sync=0.001)
+        self.assertEqual(steps[:10], [25] * 10)
+        self.assertEqual(steps[10:], [10] * 10)  # 10 steps x 0.05 s = the 0.5 s budget
+
+    def test_cheap_synchronization_keeps_prompt_loops_on_the_budget(self):
+        # Tensor parallelism: a synchronization costs little, so the budget rules.
+        steps = self.run_loops(11, prompting=True, step=1.0, sync=0.001)
+        self.assertEqual(steps[10], 1)
+
+    def test_draining_synchronization_lengthens_prompt_loops(self):
+        # Pipeline parallelism: every loop end drains the pipeline (16 s of waiting
+        # against 8 s chunks), so loops grow until it is at most 5% of the time.
+        steps = self.run_loops(11, prompting=True, step=8.0, sync=16.0)
+        self.assertEqual(steps[10], 40)  # 40 x 8 s = 320 s, 16 s of it waiting
+        self.assertLessEqual(16.0 / (steps[10] * 8.0), 0.05)
+
+    def test_each_kind_keeps_its_own_count(self):
+        self.run_loops(10, prompting=True, step=8.0, sync=16.0)
+        self.assertEqual(
+            self.run_loops(1, prompting=False, step=0.05, sync=0.001), [25]
+        )
+        self.run_loops(10, prompting=False, step=0.05, sync=0.001)
+        self.assertEqual(self.run_loops(1, prompting=True, step=8.0, sync=16.0), [40])
 
 
 class TestServer(unittest.TestCase):

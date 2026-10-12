@@ -10,6 +10,7 @@ import socket
 import time
 import uuid
 import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -236,15 +237,37 @@ class Response:
 
 
 class TimeBudget:
-    def __init__(self, budget=0.5, iterations=25, sync_frequency=10):
+    """How many steps run between the synchronizations that end each loop.
+
+    The ranks of a distributed server must run the same steps between
+    synchronizations, so a loop is a number of steps rather than a time. The
+    number is tuned so that a loop lasts about ``budget`` seconds and so that the
+    synchronization ending it, where every rank waits for the slowest, takes at
+    most ``max_sync_overhead`` of the time. That wait is short between generation
+    steps, but with pipeline parallelism a synchronization while prompts are being
+    processed drains the pipeline. Prompt-processing and generation steps differ in
+    length by orders of magnitude, so each kind of loop keeps its own number.
+    """
+
+    def __init__(
+        self, budget=0.5, iterations=25, sync_frequency=10, max_sync_overhead=0.05
+    ):
         self._is_distributed = mx.distributed.init().size() > 1
         self._budget = budget
-        self._iterations = iterations
         self._sync_frequency = sync_frequency
+        self._max_sync_overhead = max_sync_overhead
+        self._kinds = {
+            kind: {"iterations": iterations, "loops": 0, "time": 0.0, "sync": 0.0}
+            for kind in ("prompt", "generation")
+        }
+        self._kind = self._kinds["generation"]
         self._start = None
         self._current_iterations = None
-        self._loops = 0
-        self._time_spent = 0
+
+    def __call__(self, processing_prompts):
+        """Select the kind of the loop about to run."""
+        self._kind = self._kinds["prompt" if processing_prompts else "generation"]
+        return self
 
     def __iter__(self):
         self._start = time.time()
@@ -257,22 +280,35 @@ class TimeBudget:
                 raise StopIteration()
             return None
 
+        kind = self._kind
         self._current_iterations += 1
-        if self._current_iterations <= self._iterations:
+        if self._current_iterations <= kind["iterations"]:
             return None
 
-        self._loops += 1
-        self._time_spent += time.time() - self._start
-        if self._loops % self._sync_frequency == 0:
-            loop_time = mx.distributed.all_sum(self._time_spent).item()
-            avg_loop_time = loop_time / (
-                mx.distributed.init().size() * self._sync_frequency
-            )
-            factor = self._budget / avg_loop_time
-            self._iterations = max(round(self._iterations * factor), 1)
-            self._loops = 0
-            self._time_spent = 0
+        kind["loops"] += 1
+        kind["time"] += time.time() - self._start
         raise StopIteration()
+
+    @contextmanager
+    def synchronizing(self):
+        """Time the synchronization ending a loop, then retune that kind of loop.
+
+        The ranks have just waited for each other here, so the sum that retunes
+        every ``sync_frequency`` loops adds no wait of its own.
+        """
+        kind = self._kind
+        start = time.time()
+        yield
+        kind["sync"] += time.time() - start
+        if self._is_distributed and kind["loops"] >= self._sync_frequency:
+            totals = mx.distributed.all_sum(
+                mx.array([kind["time"], kind["sync"], kind["loops"]])
+            )
+            loop_time, sync_time, loops = totals.tolist()
+            target = max(self._budget, sync_time / loops / self._max_sync_overhead)
+            iterations = kind["iterations"] * target / (loop_time / loops)
+            kind["iterations"] = max(round(iterations), 1)
+            kind["loops"], kind["time"], kind["sync"] = 0, 0.0, 0.0
 
 
 class ModelProvider:
@@ -814,7 +850,7 @@ class ResponseGenerator:
                     continue
 
                 uids_to_remove = []
-                for _ in self._time_budget:
+                for _ in self._time_budget(batch_generator.processing_prompts):
                     prompt_responses, gen_responses = batch_generator.next()
                     if not prompt_responses and not gen_responses:
                         break
@@ -886,7 +922,8 @@ class ResponseGenerator:
                         if result["ctx"]._should_stop:
                             uids_to_remove.append(r.uid)
 
-                uids_to_remove = self._share_object(uids_to_remove)
+                with self._time_budget.synchronizing():
+                    uids_to_remove = self._share_object(uids_to_remove)
                 if uids_to_remove:
                     batch_generator.remove(uids_to_remove)
                     for uid in uids_to_remove:

@@ -1859,6 +1859,14 @@ class BatchGenerator:
 
         return prompt_responses, generation_responses
 
+    @property
+    def processing_prompts(self):
+        """Whether the coming steps process prompts, not only generate tokens."""
+        return bool(self._currently_processing) or (
+            bool(self._unprocessed_sequences)
+            and len(self._generation_batch) < self.completion_batch_size
+        )
+
     def next(self):
         """
         Get the next batch of responses.
