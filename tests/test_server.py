@@ -3,6 +3,7 @@
 import http
 import io
 import json
+import random
 import threading
 import time
 import unittest
@@ -15,7 +16,7 @@ import requests
 
 import mlx_lm.server as server_module
 from mlx_lm.generate import TextStateMachine
-from mlx_lm.models.cache import KVCache, QuantizedKVCache
+from mlx_lm.models.cache import KVCache, PromptTrie, QuantizedKVCache
 from mlx_lm.server import (
     APIHandler,
     GenerationContext,
@@ -975,6 +976,64 @@ class TestLRUPromptCache(unittest.TestCase):
         c, t = cache.fetch_nearest_cache(model, [3, 4])
         self.assertEqual(c, None)
         self.assertEqual(t, [3, 4])
+
+
+def depth_first_longer(trie, model, tokens):
+    """The longer match as PromptTrie.search found it before, by depth-first search."""
+    current = trie._trie[model]
+    index = 0
+    while index < len(tokens) and tokens[index] in current:
+        current = current[tokens[index]]
+        index += 1
+    if index == 0:
+        return None
+    best = None
+    stack = [(current, [])]
+    while stack:
+        current, extra = stack.pop()
+        if "__value__" in current:
+            if best is None or len(extra) < len(best):
+                best = extra
+        elif best is None or len(extra) < len(best):
+            for tok in current:
+                stack.append((current[tok], extra + [tok]))
+    return tokens[:index] + best
+
+
+class TestPromptTrie(unittest.TestCase):
+    def test_longer_matches_depth_first_search(self):
+        rng = random.Random(0)
+        model = ("test", None, None)
+        for _ in range(200):
+            trie = PromptTrie()
+            sequences = []
+            for _ in range(rng.randint(1, 12)):
+                seq = [rng.randint(0, 3) for _ in range(rng.randint(1, 10))]
+                trie.add(model, seq, len(sequences))
+                sequences.append(seq)
+            for seq in rng.sample(sequences, rng.randint(0, len(sequences) - 1)):
+                if trie.search(model, seq).exact is not None:
+                    trie.pop(model, seq)
+            for _ in range(20):
+                query = [rng.randint(0, 3) for _ in range(rng.randint(1, 10))]
+                result = trie.search(model, query)
+                if result.exact is None:
+                    expected = depth_first_longer(trie, model, query)
+                    self.assertEqual(result.longer, expected)
+
+    def test_long_divergent_suffix(self):
+        # The depth-first search copied the path at each node: minutes here.
+        model = ("test", None, None)
+        trie = PromptTrie()
+        long = [1] + list(range(2, 200_002))
+        trie.add(model, long, "long")
+        trie.add(model, [1, 0, 7], "short")
+        start = time.perf_counter()
+        result = trie.search(model, [1, 2, 3, 9])
+        self.assertLess(time.perf_counter() - start, 5.0)
+        self.assertEqual(result.common_prefix, 3)
+        self.assertEqual(result.longer, long)
+        self.assertEqual(trie.search(model, [1, 5]).longer, [1, 0, 7])
 
 
 class TestMakeSampler(unittest.TestCase):
