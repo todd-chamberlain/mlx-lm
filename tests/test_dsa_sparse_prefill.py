@@ -155,9 +155,11 @@ def block_bytes(n):
     return mock.patch.object(deepseek_v32, "DSA_BLOCK_BYTES", n)
 
 
-def make_model(module, args, seed=0):
+def make_model(module, args, seed=0, dtype=None):
     mx.random.seed(seed)
     model = module.Model(module.ModelArgs.from_dict(args))
+    if dtype is not None:
+        model.set_dtype(dtype)
     mx.eval(model.parameters())
     return model
 
@@ -548,6 +550,122 @@ class TestBlockedIndexer(DSATestCase):
             out = self.run_indexer(indexer, xs, qrs, masks, KVCache())
         self.assertEqual(out.shape, (1, 1, 1, TOPK))
         self.assertTrue(mx.array_equal(out, ref).item())
+
+
+class Pipeline:
+    """Run the stages of a pipelined model in order, in one process.
+
+    A mailbox replaces the distributed send and recv, so each stage gets
+    exactly what the stage before it sent.
+    """
+
+    def __init__(self, args, ranges, dtype=None):
+        # ranges[r] is the [start, end) of layers of rank r.
+        self.size = len(ranges)
+        self.stages = []
+        for rank in range(self.size):
+            model = make_model(glm_moe_dsa, args, dtype=dtype)
+            group = mock.Mock(rank=lambda r=rank: r, size=lambda: self.size)
+            model.model.pipeline(group, split=[end - start for start, end in ranges])
+            assert model.model.start_idx == ranges[rank][0]
+            self.stages.append(model)
+        self.sent = []
+
+    def make_cache(self):
+        return [stage.make_cache() for stage in self.stages]
+
+    def __call__(self, inputs, cache):
+        box = {}
+
+        def send(x, dst, **kwargs):
+            box[(rank, dst)] = x
+            self.sent.append((rank, x.shape))
+            return x
+
+        def recv(shape, dtype, src, **kwargs):
+            x = box.pop((src, rank))
+            assert x.shape == tuple(shape) and x.dtype == dtype, (x.shape, shape)
+            return x
+
+        def recv_like(x, src, **kwargs):
+            return recv(x.shape, x.dtype, src)
+
+        with mock.patch.multiple(
+            mx.distributed,
+            send=send,
+            recv=recv,
+            recv_like=recv_like,
+            all_gather=lambda x, **kwargs: x,
+        ):
+            for rank in reversed(range(self.size)):
+                out = self.stages[rank](inputs, cache=cache[rank])
+                mx.eval(out, [c.state for c in cache[rank]])
+        assert not box, "every message is received"
+        return out
+
+
+class TestPipelineTopk(DSATestCase):
+    """A stage that starts on a shared layer attends with the topk it reuses."""
+
+    # Layer types: full, shared, shared, full, shared, shared.
+    SHARED_BOUNDARIES = [(5, 6), (2, 5), (0, 2)]
+    FULL_BOUNDARIES = [(3, 6), (0, 3)]
+
+    def run_both(self, ranges, chunks, steps=4, left_padding=None, dtype=None):
+        ref = make_model(glm_moe_dsa, GLM_ARGS, dtype=dtype)
+        pipe = Pipeline(GLM_ARGS, ranges, dtype=dtype)
+        B = 1 if left_padding is None else len(left_padding)
+        inputs = tokens((B, sum(chunks)), seed=5)
+        if left_padding is None:
+            ref_cache, pipe_cache = ref.make_cache(), pipe.make_cache()
+        else:
+            ref_cache = batch_cache(ref, left_padding)
+            pipe_cache = [batch_cache(s, left_padding) for s in pipe.stages]
+        start = 0
+        for n in chunks:
+            chunk = inputs[:, start : start + n]
+            start += n
+            expected = ref(chunk, cache=ref_cache)
+            with SparseCalls() as calls:
+                got = pipe(chunk, pipe_cache)
+            self.assertTrue(mx.array_equal(got, expected).item(), (n, start))
+        y = mx.argmax(expected[:, -1:], axis=-1)
+        for _ in range(steps):
+            expected = ref(y, cache=ref_cache)
+            self.assertTrue(mx.array_equal(pipe(y, pipe_cache), expected).item())
+            y = mx.argmax(expected[:, -1:], axis=-1)
+        return pipe, calls
+
+    def test_stage_starts_on_shared_layer(self):
+        # Chunks cross index_topk, then decode with the topk handed over.
+        pipe, calls = self.run_both(self.SHARED_BOUNDARIES, [5, 7, 16, 9])
+        self.assertEqual(calls.count, 6)  # every layer, in the last chunk
+        D = GLM_ARGS["hidden_size"]
+        widths = {shape[-1] for rank, shape in pipe.sent if rank > 0}
+        self.assertEqual(widths, {D, D + TOPK})
+
+    def test_stage_starts_on_full_layer(self):
+        pipe, _ = self.run_both(self.FULL_BOUNDARIES, [5, 7, 16, 9])
+        D = GLM_ARGS["hidden_size"]
+        self.assertEqual({shape[-1] for _, shape in pipe.sent}, {D})
+
+    def test_left_padded_batch(self):
+        self.run_both(self.SHARED_BOUNDARIES, [6, 14, 4], left_padding=[0, 5])
+
+    def test_message_dtypes(self):
+        # The topk travels as the bits of h's dtype.
+        model = make_model(glm_moe_dsa, GLM_ARGS).model
+        topk = mx.random.randint(0, 2**30, (2, 1, 3, TOPK)).astype(mx.uint32)
+        for dtype in (mx.bfloat16, mx.float16, mx.float32):
+            h = mx.random.normal((2, 3, GLM_ARGS["hidden_size"])).astype(dtype)
+            message = model._with_topk(h, topk)
+            width = TOPK * 4 // dtype.size
+            self.assertEqual(message.shape[-1], h.shape[-1] + width)
+            with mock.patch.object(mx.distributed, "recv", lambda *a, **k: message):
+                got_h, got_topk = model._recv_with_topk(h, 1)
+            self.assertTrue(mx.array_equal(got_h, h).item(), dtype)
+            self.assertEqual(got_topk.dtype, mx.uint32)
+            self.assertTrue(mx.array_equal(got_topk, topk).item(), dtype)
 
 
 class TestPeakMemory(DSATestCase):
