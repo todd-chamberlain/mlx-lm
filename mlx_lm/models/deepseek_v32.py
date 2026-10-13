@@ -54,6 +54,18 @@ class ModelArgs(BaseModelArgs):
     indexer_rope_interleave: bool = False
 
 
+# Size limit for the largest tensors of one query block in the indexer and in
+# the sparse prefill attention, so that their memory does not grow with L * S.
+# Blocks overlap in flight, so the peak of one call is about 2.5-3x this.
+DSA_BLOCK_BYTES = 1 << 30
+
+
+def _query_blocks(length: int, row_bytes: int):
+    step = max(1, DSA_BLOCK_BYTES // row_bytes)
+    for start in range(0, length, step):
+        yield start, min(start + step, length)
+
+
 class Indexer(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -104,21 +116,37 @@ class Indexer(nn.Module):
             cache.values = mx.zeros_like(cache.keys)
         if k.shape[2] <= self.index_topk:
             return None
-        scores = q @ k.swapaxes(-1, -2)
-        scores = mx.maximum(scores, 0)
         weights = self.weights_proj(x) * (self.n_heads**-0.5 * self.softmax_scale)
         weights = weights.swapaxes(-1, -2)[..., None]
-        scores = scores * weights
-        # TODO(michalk8): remove once ml-explore/mlx#3784 is merged
-        if s > 1:
-            scores = sum(scores[:, h : h + 1] for h in range(scores.shape[1]))
-        else:
-            scores = scores.sum(axis=1, keepdims=True)
-        if mask is not None:
-            scores = mx.where(mask, scores, -float("inf"))
-        return mx.argpartition(scores, kth=-self.index_topk, axis=-1)[
-            ..., -self.index_topk :
-        ]
+        row_bytes = b * self.n_heads * k.shape[2] * q.dtype.size
+        topk = []
+        for start, end in _query_blocks(s, row_bytes):
+            q_block = q[:, :, start:end]
+            if topk:
+                # Run the blocks in sequence, so only one block is in memory.
+                q_block = mx.depends(q_block, topk[-1])
+            if s > 1:
+                # Copy the row slice so the matmul can fold the heads into M.
+                q_block = mx.contiguous(q_block)
+            scores = q_block @ k.swapaxes(-1, -2)
+            scores = mx.maximum(scores, 0)
+            scores = scores * weights[:, :, start:end]
+            # TODO(michalk8): remove once ml-explore/mlx#3784 is merged
+            if s > 1:
+                scores = sum(scores[:, h : h + 1] for h in range(scores.shape[1]))
+            else:
+                scores = scores.sum(axis=1, keepdims=True)
+            if mask is not None:
+                scores = mx.where(mask[..., start:end, :], scores, -float("inf"))
+            block_topk = mx.argpartition(scores, kth=-self.index_topk, axis=-1)[
+                ..., -self.index_topk :
+            ]
+            if s > 1:
+                # The slice is a view that keeps the whole [B, 1, rows, S]
+                # argpartition output. Copy it, so that buffer is freed.
+                block_topk = mx.contiguous(block_topk)
+            topk.append(block_topk)
+        return topk[0] if len(topk) == 1 else mx.concatenate(topk, axis=2)
 
 
 class DeepseekV32Attention(nn.Module):
@@ -187,6 +215,50 @@ class DeepseekV32Attention(nn.Module):
             scaling_config=self.config.rope_scaling,
         )
 
+    def _sparse_attention(self, q_nope, q_pe, kv_latent, k_pe, topk_indices, mask):
+        """Prefill attention over only the top-k keys of each query.
+
+        The result is the same as dense attention with all other keys masked,
+        but the cost is O(L * K) and not O(L * S).
+        """
+        B, H, L, _ = q_pe.shape
+        K = topk_indices.shape[-1]
+        r = kv_latent.shape[-1]
+        row_bytes = B * K * (r + k_pe.shape[-1] + 4 * H) * kv_latent.dtype.size
+        neg = mx.array(mx.finfo(q_pe.dtype).min, q_pe.dtype)
+
+        def gather(x, idx):
+            idx = mx.broadcast_to(idx, idx.shape[:-1] + x.shape[-1:])
+            return mx.take_along_axis(x, idx, axis=2).reshape(-1, 1, K, x.shape[-1])
+
+        def heads_as_queries(x):
+            # [B, H, n, D] -> [B * n, 1, H, D], one batch entry for each query
+            return x.transpose(0, 2, 1, 3).reshape(-1, 1, H, x.shape[-1])
+
+        outputs = []
+        for start, end in _query_blocks(L, row_bytes):
+            idx = topk_indices[:, :, start:end]
+            if outputs:
+                # Run the blocks in sequence, so only one block is in memory.
+                idx = mx.stop_gradient(mx.depends(idx, outputs[-1]))
+            flat_idx = idx.reshape(B, 1, -1, 1)
+            kv = gather(kv_latent, flat_idx)
+            pe = gather(k_pe, flat_idx)
+            q = heads_as_queries(self.embed_q(q_nope[:, :, start:end]))
+            pe_scores = heads_as_queries(q_pe[:, :, start:end] * self.scale)
+            pe_scores = pe_scores @ pe.swapaxes(-1, -2)
+            if mask is not None:
+                m = mask[..., start:end, :]
+                m = mx.broadcast_to(m, idx.shape[:-1] + m.shape[-1:])
+                valid = mx.take_along_axis(m, idx, axis=-1).reshape(-1, 1, 1, K)
+                pe_scores = mx.where(valid, pe_scores, neg)
+            out = mx.fast.scaled_dot_product_attention(
+                q, kv, kv, scale=self.scale, mask=pe_scores
+            )
+            out = out.reshape(B, end - start, H, r).transpose(0, 2, 1, 3)
+            outputs.append(self.unembed_out(out))
+        return outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=2)
+
     def __call__(
         self,
         x: mx.array,
@@ -217,6 +289,11 @@ class DeepseekV32Attention(nn.Module):
             cache = [None] * 2
 
         topk_indices = self.indexer(x, qr, mask, cache=cache[1])
+        # Ensure the indexer cache is evaluated even if the topk_indices are unused
+        # to keep the graph from getting too large
+        if cache is not None and cache[0] is not None:
+            cache[0].keys = mx.depends(cache[0].keys, (cache[1].keys, cache[1].values))
+
         if topk_indices is not None:
             topk_indices = mx.stop_gradient(topk_indices)
             if L == 1:
@@ -234,19 +311,11 @@ class DeepseekV32Attention(nn.Module):
                 if mask is not None:
                     mask = mx.take_along_axis(mask, topk_indices, axis=-1)
             else:
-                shape = list(topk_indices.shape)
-                shape[-1] = kv_latent.shape[2]
-                sparse_mask = mx.zeros(shape, dtype=mx.bool_)
-                sparse_mask = mx.put_along_axis(
-                    sparse_mask, topk_indices, mx.array(True), axis=-1
+                output = self._sparse_attention(
+                    q_nope, q_pe, kv_latent, k_pe, topk_indices, mask
                 )
-                if mask is not None:
-                    sparse_mask = sparse_mask & mask
-                mask = sparse_mask
-        # Ensure the indexer cache is evaluated even if the topk_indices are unused
-        # to keep the graph from getting too large
-        if cache is not None and cache[0] is not None:
-            cache[0].keys = mx.depends(cache[0].keys, (cache[1].keys, cache[1].values))
+                output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
+                return self.o_proj(output)
 
         pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
         if mask is not None:

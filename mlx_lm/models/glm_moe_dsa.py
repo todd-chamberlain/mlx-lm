@@ -159,6 +159,18 @@ class GlmMoeDsaAttention(DeepseekV32Attention):
             # Shared layer, dense regime: no sparsity.
             topk_indices = None
 
+        # Ensure the indexer cache is evaluated even if the topk_indices are
+        # unused, to keep the graph from getting too large. Only do this on
+        # full layers, which are the only ones with an indexer cache.
+        if self.is_full and mla_cache is not None and indexer_cache is not None:
+            mla_cache.keys = mx.depends(
+                mla_cache.keys, (indexer_cache.keys, indexer_cache.values)
+            )
+
+        # Carry topk forward only if the next layer is shared and will reuse
+        # it. Mirrors HF DecoderLayer: `topk_indices if next_skip_topk else None`.
+        next_topk = topk_indices if self.next_is_shared else None
+
         if topk_indices is not None:
             topk_indices = mx.stop_gradient(topk_indices)
             if L == 1:
@@ -176,23 +188,11 @@ class GlmMoeDsaAttention(DeepseekV32Attention):
                 if mask is not None:
                     mask = mx.take_along_axis(mask, topk_indices, axis=-1)
             else:
-                shape = list(topk_indices.shape)
-                shape[-1] = kv_latent.shape[2]
-                sparse_mask = mx.zeros(shape, dtype=mx.bool_)
-                sparse_mask = mx.put_along_axis(
-                    sparse_mask, topk_indices, mx.array(True), axis=-1
+                output = self._sparse_attention(
+                    q_nope, q_pe, kv_latent, k_pe, topk_indices, mask
                 )
-                if mask is not None:
-                    sparse_mask = sparse_mask & mask
-                mask = sparse_mask
-
-        # Ensure the indexer cache is evaluated even if the topk_indices are
-        # unused, to keep the graph from getting too large. Only do this on
-        # full layers, which are the only ones with an indexer cache.
-        if self.is_full and mla_cache is not None and indexer_cache is not None:
-            mla_cache.keys = mx.depends(
-                mla_cache.keys, (indexer_cache.keys, indexer_cache.values)
-            )
+                output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
+                return self.o_proj(output), next_topk
 
         pe_scores = (q_pe * self.scale) @ k_pe.swapaxes(-1, -2)
         if mask is not None:
@@ -221,10 +221,6 @@ class GlmMoeDsaAttention(DeepseekV32Attention):
 
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
         out = self.o_proj(output)
-
-        # Carry topk forward only if the next layer is shared and will reuse
-        # it. Mirrors HF DecoderLayer: `topk_indices if next_skip_topk else None`.
-        next_topk = topk_indices if self.next_is_shared else None
         return out, next_topk
 
 
