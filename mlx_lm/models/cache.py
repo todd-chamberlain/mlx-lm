@@ -1582,18 +1582,24 @@ class PromptTrie:
         longer = None
         common_prefix = index
         if index > 0:
-            best = None
-            stack = [(current, [])]
-            while stack:
-                current, extra = stack.pop()
-                if "__value__" in current:
-                    if best is None or len(extra) < len(best):
-                        best = extra
-                elif best is None or len(extra) < len(best):
-                    for tok in current:
-                        stack.append((current[tok], extra + [tok]))
-            longer = tokens[:index] + best
+            longer = tokens[:index] + self._shortest_extension(current)
         return PromptTrieResult(model, None, shorter, longer, common_prefix)
+
+    @staticmethod
+    def _shortest_extension(node):
+        # Breadth-first, so the first value found is the shortest. Newest
+        # children first, so ties resolve as in a depth-first search.
+        visited = [(node, -1, None)]
+        i = 0
+        while "__value__" not in visited[i][0]:
+            current = visited[i][0]
+            visited.extend((current[tok], i, tok) for tok in reversed(current))
+            i += 1
+        extension = []
+        while i > 0:
+            _, i, tok = visited[i]
+            extension.append(tok)
+        return extension[::-1]
 
 
 class LRUPromptCache:
