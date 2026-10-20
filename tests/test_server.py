@@ -1,5 +1,6 @@
 # Copyright © 2024 Apple Inc.
 
+import gc
 import http
 import io
 import json
@@ -7,6 +8,7 @@ import random
 import threading
 import time
 import unittest
+import weakref
 from queue import Queue
 from unittest import mock
 
@@ -18,7 +20,11 @@ from mlx_lm.generate import TextStateMachine
 from mlx_lm.models.cache import KVCache, PromptTrie, QuantizedKVCache
 from mlx_lm.server import (
     APIHandler,
+    CompletionRequest,
+    GenerationArguments,
+    LogitsProcessorArguments,
     LRUPromptCache,
+    ModelDescription,
     ResponseGenerator,
     SamplingArguments,
     TimeBudget,
@@ -744,6 +750,53 @@ class TestServerWithoutKVCacheQuantization(unittest.TestCase):
         try:
             args = type("args", (object,), {"seed": None})
             self.assertTrue(response_generator._is_batchable(args))
+        finally:
+            response_generator.stop_and_join()
+
+
+class TestServerReleasesCaches(unittest.TestCase):
+    def test_evicted_cache_of_a_finished_request_is_freed(self):
+        prompt_cache = LRUPromptCache()
+        response_generator = ResponseGenerator(DummyModelProvider(), prompt_cache)
+        try:
+            request = CompletionRequest(
+                "text", "Write a long story about a cat", [], None, None
+            )
+            args = GenerationArguments(
+                model=ModelDescription("default_model", None, None),
+                sampling=SamplingArguments(0.0, 1.0, 0, 0.0, 0.0, 0.0),
+                logits=LogitsProcessorArguments(None, 1.0, 20, 0.0, 20, 0.0, 20),
+                stop_words=[],
+                max_tokens=4,
+                num_draft_tokens=3,
+                logprobs=False,
+                top_logprobs=0,
+                seed=None,
+                chat_template_kwargs=None,
+            )
+            _, responses = response_generator.generate(request, args)
+            list(responses)
+
+            # The stored caches are freed when the prompt cache evicts them, once
+            # the generation loop is idle again.
+            for _ in range(100):
+                if len(prompt_cache):
+                    break
+                time.sleep(0.05)
+            stored = [
+                weakref.ref(c)
+                for lru in prompt_cache._lru._lrus.values()
+                for model, tokens in lru
+                for c in prompt_cache._trie.get(model, tokens).prompt_cache
+            ]
+            self.assertTrue(stored)
+            prompt_cache.trim_to(n_sequences=0)
+            for _ in range(100):
+                gc.collect()
+                if all(ref() is None for ref in stored):
+                    break
+                time.sleep(0.05)
+            self.assertTrue(all(ref() is None for ref in stored))
         finally:
             response_generator.stop_and_join()
 

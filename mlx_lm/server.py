@@ -1047,6 +1047,10 @@ class ResponseGenerator:
                         if result["ctx"]._should_stop:
                             uids_to_remove.append(r.uid)
 
+                # Do not keep references to caches. The prompt cache can evict or
+                # replace them, and the memory must then be free for the next request.
+                cache = prompt_responses = gen_responses = r = None
+
                 with self._time_budget.synchronizing():
                     uids_to_remove = self._share_object(uids_to_remove)
                 if uids_to_remove:
