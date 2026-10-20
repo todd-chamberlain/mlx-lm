@@ -801,6 +801,30 @@ class TestGenerate(unittest.TestCase):
             if all(r.finish_reason is not None for r in responses):
                 break
 
+    def test_prompt_batch_filter_keeping_every_sequence_is_a_no_op(self):
+        prompts = [
+            self.tokenizer.encode("Write a long story about a cat"),
+            self.tokenizer.encode("Write a long story about a dog"),
+        ]
+        gen = BatchGenerator(
+            self.model,
+            max_tokens=5,
+            prefill_batch_size=2,
+            prefill_step_size=4,
+            completion_batch_size=4,
+        )
+        gen.insert(prompts)
+        gen.next()
+
+        batch = gen._prompt_batch
+        keys = [c.keys for c in batch.prompt_cache]
+        batch.filter([0, 1])
+        for c, k in zip(batch.prompt_cache, keys):
+            self.assertIs(c.keys, k)
+
+        batch.filter([1])
+        self.assertEqual(batch.prompt_cache[0].keys.shape[0], 1)
+
     def test_batch_max_kv_size_creates_rotating_cache(self):
         max_kv_size = 256
         gen = BatchGenerator(

@@ -1170,6 +1170,10 @@ class PromptProcessingBatch:
         return new_batch
 
     def filter(self, keep: List[int]):
+        # Keep the arrays when all sequences stay in order: a gather copies the full
+        # cache. Left padding that all sequences share stays until the next filter.
+        if keep == list(range(len(self.uids))):
+            return
         self.uids = [self.uids[idx] for idx in keep]
         if not keep:
             self.prompt_cache.clear()
