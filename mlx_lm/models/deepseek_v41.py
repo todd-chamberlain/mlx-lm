@@ -3,10 +3,12 @@
 import math
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as np
 from mlx.nn.layers.distributed import shard_inplace, shard_linear, sum_gradients
 
 from .activations import swiglu
@@ -58,20 +60,19 @@ class ModelArgs(BaseModelArgs):
     hc_eps: float = 1e-6
 
     engram_layer_ids: tuple[int, ...] = ()
+    engram_num_embeddings: tuple[int, ...] = ()
+    engram_max_ngram_size: int = 1
+    engram_vocab_size: int = 0
+    engram_n_heads: int = 0
+    engram_head_dim: int = 0
+    engram_pad_token_id: int = 2
+    engram_compressed_vocab_size: int = 0
 
     @classmethod
     def from_dict(cls, params: dict[str, Any]) -> "ModelArgs":
         if "text_config" in params:
             params = {**params["text_config"], "model_type": params["model_type"]}
         return super().from_dict(params)
-
-    def __post_init__(self) -> None:
-        if self.engram_layer_ids:
-            raise ValueError(
-                f"Layers {list(self.engram_layer_ids)} use engram memory, which "
-                "this implementation does not have: the n-gram hash tables, the "
-                "hashed embedding lookup and the engram attention are all missing."
-            )
 
 
 def _apply_rope(
@@ -277,6 +278,8 @@ class LayerCache:
         self.index_k = None
         self.pending_kv = None
         self.pending_gate = None
+        # The first cache of a stage with engram layers keeps the last tokens.
+        self.ngram_tail = None
 
     def update_window(self, kv: mx.array) -> mx.array:
         """Return the window with kv appended, and keep its last rows."""
@@ -293,6 +296,7 @@ class LayerCache:
             self.index_k,
             self.pending_kv,
             self.pending_gate,
+            self.ngram_tail,
             mx.array(self.offset),
         )
 
@@ -311,6 +315,7 @@ class LayerCache:
             self.index_k,
             self.pending_kv,
             self.pending_gate,
+            self.ngram_tail,
         )
         return sum(a.nbytes for a in arrays if a is not None)
 
@@ -731,10 +736,159 @@ class MoE(nn.Module):
         return out.reshape(shape).astype(x.dtype)
 
 
+def _is_prime(n: int) -> bool:
+    return n > 1 and bool(np.all(n % np.arange(2, math.isqrt(n) + 1)))
+
+
+@dataclass(frozen=True)
+class EngramHash:
+    """The n-gram hash of one engram layer.
+
+    The running XOR of the multiplied tokens gives the hash of each n-gram size.
+    Each (n-gram size, head) pair takes the hash modulo its own prime, and its
+    rows of the table start at its offset.
+    """
+
+    multipliers: np.ndarray  # [max_ngram_size]
+    primes: np.ndarray  # [max_ngram_size - 1, n_heads]
+    offsets: np.ndarray  # [(max_ngram_size - 1) * n_heads]
+
+
+def _engram_hashes(args: ModelArgs) -> dict[int, EngramHash]:
+    """The hash of each engram layer, as {layer: hash}."""
+    n_ngrams = args.engram_max_ngram_size - 1
+    if n_ngrams < 1:
+        raise ValueError("Engram needs an engram_max_ngram_size of 2 or more.")
+    # Multiplied tokens must not overflow int64.
+    bound = max(1, np.iinfo(np.int64).max // args.engram_compressed_vocab_size // 2)
+    hashes = {}
+    # Each pair takes the next prime from engram_vocab_size up.
+    prime = args.engram_vocab_size - 1
+    for index, layer in enumerate(args.engram_layer_ids):
+        primes = []
+        for _ in range(n_ngrams * args.engram_n_heads):
+            prime += 1
+            while not _is_prime(prime):
+                prime += 1
+            primes.append(prime)
+        if sum(primes) != args.engram_num_embeddings[index]:
+            raise ValueError(
+                f"The engram table of layer {layer} has "
+                f"{args.engram_num_embeddings[index]} rows, but its hash uses "
+                f"{sum(primes)}."
+            )
+        rng = np.random.default_rng(10007 * layer)
+        draws = rng.integers(0, bound, size=args.engram_max_ngram_size, dtype=np.int64)
+        hashes[layer] = EngramHash(
+            multipliers=draws * 2 + 1,
+            primes=np.array(primes, dtype=np.int64).reshape(n_ngrams, -1),
+            offsets=np.cumsum([0, *primes[:-1]], dtype=np.int64),
+        )
+    return hashes
+
+
+def _compressed_token_map(tokenizer_file: Path, args: ModelArgs) -> np.ndarray:
+    """Map each token id to the id of its normalized text, as in training.
+
+    Tokens with the same text after normalization share one id.
+    """
+    from tokenizers import Regex, Tokenizer, normalizers
+
+    # A token that is only a space must not strip to the empty string.
+    sentinel = "\ue000"
+    normalizer = normalizers.Sequence(
+        [
+            normalizers.NFKC(),
+            normalizers.NFD(),
+            normalizers.StripAccents(),
+            normalizers.Lowercase(),
+            normalizers.Replace(Regex(r"[ \t\r\n]+"), " "),
+            normalizers.Replace(Regex(r"^ $"), sentinel),
+            normalizers.Strip(),
+            normalizers.Replace(sentinel, " "),
+        ]
+    )
+    tokenizer = Tokenizer.from_file(str(tokenizer_file))
+    size = tokenizer.get_vocab_size(with_added_tokens=True)
+    if size != args.vocab_size:
+        raise ValueError(
+            f"The tokenizer has {size} tokens, but the model has {args.vocab_size}."
+        )
+    ids = {}
+    token_map = np.empty(size, dtype=np.int32)
+    for token in range(size):
+        text = tokenizer.decode([token], skip_special_tokens=False)
+        if "\ufffd" in text:
+            # Part of a UTF-8 sequence: use the raw token.
+            key = tokenizer.id_to_token(token)
+        else:
+            key = normalizer.normalize_str(text) or text
+        token_map[token] = ids.setdefault(key, len(ids))
+    if len(ids) != args.engram_compressed_vocab_size:
+        raise ValueError(
+            f"The tokenizer gives {len(ids)} compressed ids, but the model "
+            f"expects {args.engram_compressed_vocab_size}."
+        )
+    return token_map
+
+
+class Engram(nn.Module):
+    """Add the hashed n-gram embedding to the streams, gated by its match."""
+
+    def __init__(self, args: ModelArgs, rows: int, ngram_hash: EngramHash):
+        super().__init__()
+        self.hc = args.hc_mult
+        self.dim = args.hidden_size
+        self.eps = args.rms_norm_eps
+        self._multipliers = mx.array(ngram_hash.multipliers)
+        self._primes = mx.array(ngram_hash.primes)
+        self._offsets = mx.array(ngram_hash.offsets)
+        self.embed = nn.Embedding(rows, args.engram_head_dim)
+        self.kv_proj = nn.Linear(
+            ngram_hash.offsets.size * args.engram_head_dim,
+            (args.hc_mult + 1) * args.hidden_size,
+            bias=False,
+        )
+        self.q_weight = mx.ones((args.hc_mult, args.hidden_size))
+        self.k_weight = mx.ones((args.hc_mult, args.hidden_size))
+
+    def _rows(self, ngrams: mx.array) -> mx.array:
+        """The table rows of each position, from its [B, L, max_ngram_size] tokens."""
+        products = ngrams * self._multipliers
+        rolling = products[..., 0]
+        rows = []
+        for size in range(1, products.shape[-1]):
+            rolling = rolling ^ products[..., size]
+            rows.append(rolling[..., None] % self._primes[size - 1])
+        return (mx.concatenate(rows, axis=-1) + self._offsets).astype(mx.uint32)
+
+    def __call__(self, streams: mx.array, ngrams: mx.array) -> mx.array:
+        batch, length = streams.shape[:2]
+        kv = self.kv_proj(self.embed(self._rows(ngrams)).reshape(batch, length, -1))
+        key, value = mx.split(kv.astype(mx.float32), [self.hc * self.dim], axis=-1)
+        key = key.reshape(batch, length, self.hc, self.dim)
+        h = streams.astype(mx.float32)
+        weight = self.q_weight.astype(mx.float32) * self.k_weight.astype(mx.float32)
+        # Normalize each stream and its key on their own.
+        rstd = mx.rsqrt(mx.mean(h * h, axis=-1) + self.eps)
+        rstd = rstd * mx.rsqrt(mx.mean(key * key, axis=-1) + self.eps)
+        dot = mx.sum(h * weight * key, axis=-1) * rstd * self.dim**-0.5
+        # The signed square root, as the training kernel does.
+        root = mx.sqrt(mx.maximum(mx.abs(dot), 1e-6))
+        gate = mx.sigmoid(mx.where(dot < 0, -root, root))
+        return (h + gate[..., None] * value[..., None, :]).astype(streams.dtype)
+
+
 class DecoderLayer(nn.Module):
-    def __init__(self, args: ModelArgs, layer_id: int):
+    def __init__(
+        self, args: ModelArgs, layer_id: int, ngram_hash: Optional[EngramHash]
+    ):
         super().__init__()
         self.layer_idx = layer_id
+        self.has_engram = ngram_hash is not None
+        if self.has_engram:
+            index = args.engram_layer_ids.index(layer_id)
+            self.engram = Engram(args, args.engram_num_embeddings[index], ngram_hash)
         self.self_attn = Attention(args, layer_id)
         self.mlp = MoE(args)
         self.input_layernorm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
@@ -753,7 +907,10 @@ class DecoderLayer(nn.Module):
         window_idx: mx.array,
         cache: LayerCache,
         shared: dict[str, Optional[mx.array]],
+        ngrams: Optional[mx.array],
     ) -> tuple[mx.array, mx.array]:
+        if self.has_engram:
+            streams = self.engram(streams, ngrams)
         attn_pre, attn_post, attn_comb = self.attn_hc(streams)
         h = self.input_layernorm(_collapse(streams, pre_mix))
         h = self.self_attn(
@@ -886,7 +1043,12 @@ class TextModel(PipelineMixin, nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.embed_tokens = nn.Embedding(args.vocab_size, args.hidden_size)
-        self.layers = [DecoderLayer(args, i) for i in range(args.num_hidden_layers)]
+        hashes = _engram_hashes(args) if args.engram_layer_ids else {}
+        if hashes:
+            self.engram_token_map = mx.zeros((args.vocab_size,), dtype=mx.int32)
+        self.layers = [
+            DecoderLayer(args, i, hashes.get(i)) for i in range(args.num_hidden_layers)
+        ]
         self.norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
         self.args = args
 
@@ -899,6 +1061,27 @@ class TextModel(PipelineMixin, nn.Module):
 
     def make_cache(self) -> list[LayerCache]:
         return [LayerCache(self.args.sliding_window) for _ in self.pipeline_layers]
+
+    def _ngrams(self, inputs: mx.array, cache: LayerCache) -> mx.array:
+        """The compressed tokens of the n-gram that ends at each position,
+        newest first, as [B, L, max_ngram_size]. Positions before the start
+        of the sequence hold the pad token."""
+        context = self.args.engram_max_ngram_size - 1
+        tokens = self.engram_token_map[inputs].astype(mx.int64)
+        batch, length = tokens.shape
+        tail = cache.ngram_tail
+        if tail is None:
+            pad = self.engram_token_map[self.args.engram_pad_token_id]
+            tail = mx.broadcast_to(pad.astype(mx.int64), (batch, context))
+        history = mx.concatenate([tail, tokens], axis=1)
+        cache.ngram_tail = history[:, length:]
+        return mx.stack(
+            [
+                history[:, context - back : context - back + length]
+                for back in range(context + 1)
+            ],
+            axis=-1,
+        )
 
     def _receive(
         self,
@@ -989,6 +1172,9 @@ class TextModel(PipelineMixin, nn.Module):
         if rank < size - 1:
             streams, pre_mix = self._receive(streams, start_pos, cache[0], shared)
 
+        ngrams = None
+        if any(layer.has_engram for layer in layers):
+            ngrams = self._ngrams(inputs, cache[0])
         for layer, layer_cache in zip(layers, cache, strict=True):
             streams, pre_mix = layer(
                 streams,
@@ -997,6 +1183,7 @@ class TextModel(PipelineMixin, nn.Module):
                 window_idx=window_idx,
                 cache=layer_cache,
                 shared=shared,
+                ngrams=ngrams,
             )
 
         if rank > 0:
@@ -1111,7 +1298,7 @@ class Model(nn.Module):
         text = {
             key: value
             for key, value in weights.items()
-            if not key.startswith(_DROP_PREFIXES) and ".engram." not in key
+            if not key.startswith(_DROP_PREFIXES)
         }
         clean = {}
         experts = {}
@@ -1162,6 +1349,16 @@ class Model(nn.Module):
                 clean[f"{name}.scales"] = scales
             clean[f"{name}.weight"] = value
         return clean
+
+    def tokenizer_weights(
+        self, model_path: Path, weights: dict[str, mx.array]
+    ) -> dict[str, mx.array]:
+        """The engram token map, which the published checkpoint does not have."""
+        key = "model.engram_token_map"
+        if not self.args.engram_layer_ids or key in weights:
+            return {}
+        token_map = _compressed_token_map(model_path / "tokenizer.json", self.args)
+        return {key: mx.array(token_map)}
 
     @property
     def cast_predicate(self) -> Callable[[str], bool]:

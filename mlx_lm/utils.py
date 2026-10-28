@@ -493,6 +493,10 @@ def load_model(
     if hasattr(model, "sanitize"):
         weights = model.sanitize(weights)
 
+    if hasattr(model, "tokenizer_weights"):
+        # Weights that the model derives from its tokenizer files.
+        weights.update(model.tokenizer_weights(model_path, weights))
+
     def _quantize(quantization):
         def class_predicate(p, m):
             # Handle custom per layer quantizations
