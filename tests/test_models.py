@@ -2477,6 +2477,35 @@ class TestModels(unittest.TestCase):
             model, args.model_type, args.vocab_size, args.num_hidden_layers
         )
 
+    def test_glm5_next(self):
+        from mlx_lm.models import glm5_next
+
+        args = glm5_next.ModelArgs(
+            model_type="glm5_next",
+            vocab_size=128,
+            hidden_size=64,
+            intermediate_size=96,
+            moe_intermediate_size=32,
+            num_hidden_layers=4,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            n_routed_experts=8,
+            num_experts_per_tok=2,
+            kv_lora_rank=32,
+            q_lora_rank=48,
+            qk_nope_head_dim=16,
+            v_head_dim=16,
+            index_topk=8,
+            index_kpool=4,
+            index_head_dim=16,
+            index_n_heads=2,
+            linear_attn_config=dict(num_heads=2, head_dim=32),
+        )
+        model = glm5_next.Model(args)
+        self.model_test_runner(
+            model, args.model_type, args.vocab_size, args.num_hidden_layers
+        )
+
     def test_mistral4(self):
         from mlx_lm.models import mistral4
 

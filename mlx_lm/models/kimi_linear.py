@@ -290,6 +290,7 @@ class KimiDeltaAttention(nn.Module):
         self.num_heads = cfg["num_heads"]
         self.head_dim = cfg["head_dim"]
         self.conv_kernel = cfg.get("short_conv_kernel_size", 4)
+        self.lower_bound = cfg.get("gate_lower_bound")
 
         self.projection_dim = self.num_heads * self.head_dim
         hidden = args.hidden_size
@@ -376,6 +377,7 @@ class KimiDeltaAttention(nn.Module):
             state=ssm_state,
             mask=mask,
             use_kernel=not self.training,
+            lower_bound=self.lower_bound,
         )
 
         if cache is not None:
