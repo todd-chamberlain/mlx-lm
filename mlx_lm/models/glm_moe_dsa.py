@@ -233,6 +233,37 @@ class GlmMoeDsaModel(DeepseekV32Model):
             GlmMoeDsaDecoderLayer(config, idx)
             for idx in range(config.num_hidden_layers)
         ]
+        # Per layer: whether it attends with the topk of an earlier full layer.
+        self._reuses_topk, full_before = [], False
+        for kind in config.indexer_types[: config.num_hidden_layers]:
+            self._reuses_topk.append(full_before and kind == "shared")
+            full_before = full_before or kind == "full"
+        # Read from an indexer, which can be configured apart from the config.
+        self._index_topk = next(
+            (
+                layer.self_attn.indexer.index_topk
+                for layer in self.layers
+                if layer.self_attn.indexer is not None
+            ),
+            None,
+        )
+
+    def _hands_over_topk(self, layer_idx, n_keys):
+        """Whether layer ``layer_idx`` gets a topk from the layer before it."""
+        return self._reuses_topk[layer_idx] and n_keys > self._index_topk
+
+    @staticmethod
+    def _with_topk(h, topk):
+        B, L, _ = h.shape
+        return mx.concatenate([h, topk.reshape(B, L, -1).view(h.dtype)], axis=-1)
+
+    def _recv_with_topk(self, h, src):
+        B, L, D = h.shape
+        width = self._index_topk * mx.uint32.size // h.dtype.size
+        h, topk = mx.split(
+            mx.distributed.recv((B, L, D + width), h.dtype, src), [D], axis=-1
+        )
+        return h, mx.contiguous(topk).view(mx.uint32).reshape(B, 1, L, -1)
 
     def __call__(
         self,
@@ -250,17 +281,31 @@ class GlmMoeDsaModel(DeepseekV32Model):
             h, cache[0][0] if cache[0] else None, return_array=True
         )
 
-        # Receive from the previous process in the pipeline
-        if pipeline_rank < pipeline_size - 1:
-            h = mx.distributed.recv_like(h, (pipeline_rank + 1))
+        # The keys of this step, the same on every rank: above index_topk the
+        # full layers select a topk.
+        n_keys = h.shape[1] + (cache[0].size() if cache[0] is not None else 0)
 
+        # Receive from the previous process in the pipeline. A stage that starts
+        # on a shared layer gets the topk with h.
         prev_topk_indices = None
+        if pipeline_rank < pipeline_size - 1:
+            if self._hands_over_topk(self.start_idx, n_keys):
+                h, prev_topk_indices = self._recv_with_topk(h, pipeline_rank + 1)
+            else:
+                h = mx.distributed.recv_like(h, (pipeline_rank + 1))
+
         for layer, c in zip(self.pipeline_layers, cache):
             h, prev_topk_indices = layer(h, mask, c, prev_topk_indices)
 
         # Send to the next process in the pipeline
         if pipeline_rank != 0:
-            h = mx.distributed.send(h, (pipeline_rank - 1) % pipeline_size)
+            dst = (pipeline_rank - 1) % pipeline_size
+            if self._hands_over_topk(self.end_idx, n_keys):
+                # One message, so the topk cannot arrive out of order.
+                sent = mx.distributed.send(self._with_topk(h, prev_topk_indices), dst)
+                h = mx.depends(h, sent)
+            else:
+                h = mx.distributed.send(h, dst)
             if cache[-1] is not None:
                 cache[-1][0].keys = mx.depends(cache[-1][0].keys, h)
 
