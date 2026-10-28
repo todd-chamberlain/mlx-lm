@@ -1317,6 +1317,12 @@ class Model(nn.Module):
         # starts a key with "model.".
         if any(key.startswith("model.") for key in weights):
             return weights
+        # mx.load reads on the CPU. Repacking there too keeps a GPU command buffer
+        # from waiting on a whole table read (98 GB), which the Metal watchdog stops.
+        with mx.stream(mx.cpu):
+            return self._sanitize_published(weights)
+
+    def _sanitize_published(self, weights: dict[str, mx.array]) -> dict[str, mx.array]:
         text = {
             key: value
             for key, value in weights.items()
