@@ -5,10 +5,8 @@ import unittest
 from pathlib import Path
 
 import mlx.core as mx
-import mlx.nn as nn
 
 from mlx_lm.models import deepseek_v41
-from mlx_lm.utils import infer_quant_config
 
 SMALL = dict(
     vocab_size=128,
@@ -52,6 +50,13 @@ def engram_model(**overrides):
     model.model.engram_token_map = mx.random.randint(
         0, args.engram_compressed_vocab_size, (args.vocab_size,)
     ).astype(mx.int32)
+    for layer in model.model.layers:
+        if layer.has_engram:
+            table = layer.engram.embed
+            rows = table.weight.shape[0]
+            table.weight, table.scales = mx.quantize(
+                mx.random.normal((rows, args.engram_head_dim)), mode="mxfp8"
+            )
     return model
 
 
@@ -195,14 +200,18 @@ class TestDeepseekV41(unittest.TestCase):
         )
         self.assertEqual(clean[prefix + "kv_proj.scales"].shape, (320, 4))
         embed = model.model.layers[1].engram.embed
-        params = infer_quant_config(prefix + "embed", embed, clean)
-        self.assertEqual(params["mode"], "mxfp8")
-        quantized = nn.QuantizedEmbedding(240, 32, **params)
-        quantized.weight = clean[prefix + "embed.weight"]
-        quantized.scales = clean[prefix + "embed.scales"]
+        embed.load_weights(
+            [(k, clean[prefix + "embed." + k]) for k in ("weight", "scales")]
+        )
         rows = mx.array([0, 17, 239])
         expected = mx.from_fp8(mx.to_fp8(table), mx.float32)[rows]
-        self.assertTrue(mx.allclose(quantized(rows).astype(mx.float32), expected))
+        self.assertTrue(mx.allclose(embed(rows).astype(mx.float32), expected))
+
+    def test_engram_table_past_quantize_limit(self):
+        # Real tables have more than 2**31 groups of 32, which mx.quantize rejects.
+        table = deepseek_v41.EngramTable(384_016_682, 256)
+        self.assertEqual(table.weight.shape, (384_016_682, 64))
+        self.assertEqual(table.scales.shape, (384_016_682, 8))
 
     def test_tokenizer_weights(self):
         model = engram_model()
@@ -210,6 +219,84 @@ class TestDeepseekV41(unittest.TestCase):
         self.assertEqual(model.tokenizer_weights(Path("/missing"), {key: 0}), {})
         plain = deepseek_v41.Model(deepseek_v41.ModelArgs(**SMALL))
         self.assertEqual(plain.tokenizer_weights(Path("/missing"), {}), {})
+
+
+class TestDeepseekV41ChatTemplate(unittest.TestCase):
+    """Prompts as DeepSeek's encoding/encoding.py renders them."""
+
+    def setUp(self):
+        from mlx_lm.chat_templates import deepseek_v41
+
+        self.t = deepseek_v41
+        self.messages = [
+            {"role": "system", "content": "Be brief."},
+            {"role": "user", "content": "Hi"},
+        ]
+
+    def test_thinking(self):
+        out = self.t.apply_chat_template(self.messages, add_generation_prompt=True)
+        self.assertEqual(
+            out,
+            "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, "
+            "the higher the value, the more thorough the reasoning)\n\nBe brief."
+            "<｜User｜>Hi<｜Assistant｜><think>",
+        )
+
+    def test_chat(self):
+        out = self.t.apply_chat_template(
+            self.messages, add_generation_prompt=True, enable_thinking=False
+        )
+        self.assertEqual(
+            out,
+            "<｜begin▁of▁sentence｜><｜System｜>Be brief.<｜User｜>Hi"
+            "<｜Assistant｜></think>",
+        )
+
+    def test_no_generation_prompt(self):
+        out = self.t.apply_chat_template(self.messages, enable_thinking=False)
+        self.assertTrue(out.endswith("<｜User｜>Hi"))
+
+    def test_history_drops_old_thinking(self):
+        messages = self.messages + [
+            {"role": "assistant", "content": "Hello.", "reasoning_content": "greet"},
+            {"role": "user", "content": "Bye"},
+        ]
+        out = self.t.apply_chat_template(messages, add_generation_prompt=True)
+        self.assertIn("<｜Assistant｜></think>Hello.<｜end▁of▁sentence｜>", out)
+        self.assertNotIn("greet", out)
+
+    def test_tools_and_results(self):
+        tools = [
+            {
+                "type": "function",
+                "function": {"name": "now", "parameters": {"type": "object"}},
+            }
+        ]
+        messages = self.messages + [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "now", "arguments": "{}"}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "a", "content": "12:00"},
+        ]
+        out = self.t.apply_chat_template(
+            messages, tools=tools, add_generation_prompt=True
+        )
+        self.assertIn('"name": "now"', out)
+        self.assertIn('<｜DSML｜ invoke name="now">', out)
+        self.assertTrue(
+            out.endswith("<tool_result>12:00</tool_result><｜Assistant｜><think>")
+        )
+
+    def test_model_declares_template(self):
+        from mlx_lm.models import deepseek_v41
+
+        self.assertEqual(
+            deepseek_v41.TOKENIZER_DEFAULTS["chat_template_type"], "deepseek_v41"
+        )
 
 
 if __name__ == "__main__":

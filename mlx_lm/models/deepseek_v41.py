@@ -17,6 +17,9 @@ from .pipeline import PipelineMixin
 from .rope_utils import YarnRoPE
 from .switch_layers import SwitchGLU, SwitchLinear
 
+# The checkpoint has no chat template.
+TOKENIZER_DEFAULTS = {"chat_template_type": "deepseek_v41"}
+
 
 @dataclass
 class ModelArgs(BaseModelArgs):
@@ -832,6 +835,25 @@ def _compressed_token_map(tokenizer_file: Path, args: ModelArgs) -> np.ndarray:
     return token_map
 
 
+class EngramTable(nn.Module):
+    """The engram embedding table, packed as mxfp8 like the checkpoint.
+
+    MLX quantizes at most 2**31 groups in one call, and a table has more, so it is
+    declared packed instead of quantized from an embedding.
+    """
+
+    def __init__(self, rows: int, dims: int):
+        super().__init__()
+        self.weight = mx.zeros((rows, dims // 4), dtype=mx.uint32)
+        self.scales = mx.zeros((rows, dims // 32), dtype=mx.uint8)
+        self.freeze()
+
+    def __call__(self, rows: mx.array) -> mx.array:
+        return mx.dequantize(
+            self.weight[rows], self.scales[rows], group_size=32, bits=8, mode="mxfp8"
+        )
+
+
 class Engram(nn.Module):
     """Add the hashed n-gram embedding to the streams, gated by its match."""
 
@@ -843,7 +865,7 @@ class Engram(nn.Module):
         self._multipliers = mx.array(ngram_hash.multipliers)
         self._primes = mx.array(ngram_hash.primes)
         self._offsets = mx.array(ngram_hash.offsets)
-        self.embed = nn.Embedding(rows, args.engram_head_dim)
+        self.embed = EngramTable(rows, args.engram_head_dim)
         self.kv_proj = nn.Linear(
             ngram_hash.offsets.size * args.engram_head_dim,
             (args.hc_mult + 1) * args.hidden_size,
