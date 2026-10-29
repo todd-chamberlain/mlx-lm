@@ -133,6 +133,11 @@ def _round_fp4(x: mx.array) -> mx.array:
     return mx.sign(x) * _FP4_LUT[idx]
 
 
+# Size limit for the index scores of one block of queries: a chunk's scores against
+# a long context (32 heads x 300k keys x 512 queries) would not fit in memory.
+INDEX_BLOCK_BYTES = 1 << 30
+
+
 def _fake_quant_fp4(
     x: mx.array, *, block_size: int, e4m3_scale: bool = False
 ) -> mx.array:
@@ -448,15 +453,54 @@ class Indexer(nn.Module):
             batch, length, self.num_heads, self.head_dim
         )
         q = _apply_rope(q, rope, rope_dim=self.rope_dim, offset=start_pos)
-        q = _fake_quant_fp4(q, block_size=32)
+        q = _fake_quant_fp4(q, block_size=32).astype(mx.float32)
         keys = index_k.astype(mx.float32)
         weights = self.weights_proj(x).astype(mx.float32) * (self.num_heads**-0.5)
-        scores = mx.matmul(q.astype(mx.float32), keys[:, None].swapaxes(-1, -2))
-        scores = mx.maximum(scores, 0.0) * (self.head_dim**-0.5)
-        scores = mx.sum(scores * weights[..., None], axis=2)
         # A query sees the groups that end at or before it.
         lens = ((start_pos + 1 + mx.arange(length)) // self.ratio)[:, None]
-        visible = mx.arange(index_k.shape[1])[None, :] < lens
+
+        # Each query selects on its own, so score the queries in blocks: the
+        # scores of a whole chunk against a long context do not fit in memory.
+        n_keys = index_k.shape[1]
+        step = max(1, INDEX_BLOCK_BYTES // (batch * self.num_heads * n_keys * 4))
+        chosen, selected = [], []
+        for start in range(0, length, step):
+            end = min(start + step, length)
+            q_block = q[:, start:end]
+            if chosen:
+                # Run the blocks in sequence, so only one block is in memory.
+                q_block = mx.depends(q_block, chosen[-1])
+            block_chosen, block_candidates = self._select(
+                q_block,
+                keys,
+                weights[:, start:end],
+                lens[start:end],
+                None if candidates is None else candidates[:, start:end],
+            )
+            chosen.append(block_chosen)
+            selected.append(block_candidates)
+        if self.is_candidate_source and self.candidate_topk_blocks > 0:
+            candidates = (
+                selected[0] if len(selected) == 1 else mx.concatenate(selected, 1)
+            )
+        return (
+            chosen[0] if len(chosen) == 1 else mx.concatenate(chosen, 1)
+        ), candidates
+
+    def _select(
+        self,
+        q: mx.array,
+        keys: mx.array,
+        weights: mx.array,
+        lens: mx.array,
+        candidates: Optional[mx.array],
+    ) -> tuple[mx.array, Optional[mx.array]]:
+        """The top-k entries and the candidate mask of a block of queries."""
+        batch, length = q.shape[:2]
+        scores = mx.matmul(q, keys[:, None].swapaxes(-1, -2))
+        scores = mx.maximum(scores, 0.0) * (self.head_dim**-0.5)
+        scores = mx.sum(scores * weights[..., None], axis=2)
+        visible = mx.arange(keys.shape[1])[None, :] < lens
         scores = mx.where(visible[None], scores, -mx.inf)
 
         if self.is_candidate_source and self.candidate_topk_blocks > 0:
@@ -481,7 +525,7 @@ class Indexer(nn.Module):
         elif candidates is not None:
             scores = mx.where(candidates, scores, -mx.inf)
 
-        k = min(self.index_topk, index_k.shape[1])
+        k = min(self.index_topk, keys.shape[1])
         chosen = mx.argpartition(-scores, k - 1, axis=-1)[..., :k].astype(mx.int32)
         return mx.where(chosen < lens[None], chosen, -1), candidates
 

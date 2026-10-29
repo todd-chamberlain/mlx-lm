@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import mlx.core as mx
@@ -96,6 +97,24 @@ class TestDeepseekV41(unittest.TestCase):
         self.assertTrue(
             mx.allclose(mx.concatenate(steps, axis=1), full, rtol=1e-4, atol=1e-4)
         )
+
+    def test_index_blocks_match(self):
+        # Scoring the queries in blocks selects the same entries.
+        args = deepseek_v41.ModelArgs(**SMALL)
+        mx.random.seed(0)
+        model = deepseek_v41.Model(args)
+        tokens = mx.random.randint(0, args.vocab_size, (2, 24))
+
+        def run():
+            cache = model.make_cache()
+            out = [model(tokens[:, s:e], cache=cache) for s, e in ((0, 11), (11, 24))]
+            return mx.concatenate(out, axis=1)
+
+        whole = run()
+        # One query per block: 2 sequences x 4 heads x at most 24 keys x 4 bytes.
+        with patch.object(deepseek_v41, "INDEX_BLOCK_BYTES", 2 * 4 * 24 * 4):
+            blocked = run()
+        self.assertTrue(mx.array_equal(whole, blocked).item())
 
     def test_engram_cached_matches_forward(self):
         mx.random.seed(0)
