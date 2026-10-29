@@ -3,6 +3,7 @@
 import unittest
 
 from mlx_lm.tool_parsers import (
+    deepseek_v41,
     function_gemma,
     gemma4,
     glm47,
@@ -480,6 +481,43 @@ class TestToolParsing(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 mistral.parse_tool_call(text, None)
+
+    def test_deepseek_v41(self):
+        text = (
+            "<｜DSML｜ calls>\n"
+            '<｜DSML｜ invoke name="ToolSearch">\n'
+            '<｜DSML｜ parameter name="query" string="true">select:Grep,Glob'
+            "</｜DSML｜ parameter>\n"
+            '<｜DSML｜ parameter name="max_results" string="false">2'
+            "</｜DSML｜ parameter>\n"
+            "</｜DSML｜ invoke>\n"
+            '<｜DSML｜ invoke name="write">\n'
+            '<｜DSML｜ parameter name="path" string="true">a "b".txt</｜DSML｜ parameter>\n'
+            '<｜DSML｜ parameter name="lines" string="false">["x", {"y": null}]'
+            "</｜DSML｜ parameter>\n"
+            '<｜DSML｜ parameter name="body" string="true">line 1\nline 2</｜DSML｜ parameter>\n'
+            "</｜DSML｜ invoke>\n"
+            "</｜DSML｜ calls>"
+        )
+        self.assertEqual(
+            deepseek_v41.parse_tool_call(text),
+            [
+                {
+                    "name": "ToolSearch",
+                    "arguments": {"query": "select:Grep,Glob", "max_results": 2},
+                },
+                {
+                    "name": "write",
+                    "arguments": {
+                        "path": 'a "b".txt',
+                        "lines": ["x", {"y": None}],
+                        "body": "line 1\nline 2",
+                    },
+                },
+            ],
+        )
+        with self.assertRaises(ValueError):
+            deepseek_v41.parse_tool_call('<｜DSML｜ invoke name="f">')
 
     def test_kimi_k2(self):
         # Single tool call

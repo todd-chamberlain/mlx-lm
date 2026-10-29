@@ -18,7 +18,10 @@ from .rope_utils import YarnRoPE
 from .switch_layers import SwitchGLU, SwitchLinear
 
 # The checkpoint has no chat template.
-TOKENIZER_DEFAULTS = {"chat_template_type": "deepseek_v41"}
+TOKENIZER_DEFAULTS = {
+    "chat_template_type": "deepseek_v41",
+    "tool_parser_type": "deepseek_v41",
+}
 
 
 @dataclass
