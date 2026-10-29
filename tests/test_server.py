@@ -766,6 +766,76 @@ class TestServerWithoutKVCacheQuantization(unittest.TestCase):
             response_generator.stop_and_join()
 
 
+class TestTemplateArguments(unittest.TestCase):
+    """Request fields that reach the chat template, on a server of their own."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.response_generator = ResponseGenerator(
+            DummyModelProvider(), LRUPromptCache()
+        )
+        cls.httpd = http.server.HTTPServer(
+            ("localhost", 0),
+            lambda *args, **kwargs: APIHandler(cls.response_generator, *args, **kwargs),
+        )
+        cls.port = cls.httpd.server_port
+        cls.server_thread = threading.Thread(target=cls.httpd.serve_forever)
+        cls.server_thread.daemon = True
+        cls.server_thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.server_thread.join()
+        cls.response_generator.stop_and_join()
+
+    def test_reasoning_effort_reaches_the_chat_template(self):
+        url = f"http://localhost:{self.port}/v1/chat/completions"
+        seen = []
+        generate = self.response_generator.generate
+
+        def recording(request, args, *a, **kw):
+            seen.append(args.chat_template_kwargs)
+            return generate(request, args, *a, **kw)
+
+        self.response_generator.generate = recording
+        try:
+            messages = [{"role": "user", "content": "hi"}]
+            for extra in (
+                {"reasoning_effort": "low"},
+                {"reasoning_effort": "low", "chat_template_kwargs": {"x": 1}},
+                {
+                    "reasoning_effort": "low",
+                    "chat_template_kwargs": {"reasoning_effort": "max"},
+                },
+                {},
+            ):
+                body = {"model": "chat_model", "messages": messages, "max_tokens": 2}
+                r = requests.post(url, json={**body, **extra})
+                self.assertEqual(r.status_code, 200, r.text)
+        finally:
+            self.response_generator.generate = generate
+        self.assertEqual(
+            seen,
+            [
+                {"reasoning_effort": "low"},
+                {"reasoning_effort": "low", "x": 1},
+                {"reasoning_effort": "max"},
+                None,
+            ],
+        )
+
+    def test_malformed_template_arguments_are_rejected(self):
+        url = f"http://localhost:{self.port}/v1/chat/completions"
+        messages = [{"role": "user", "content": "hi"}]
+        for extra in ({"chat_template_kwargs": [1]}, {"reasoning_effort": [1]}):
+            body = {"model": "chat_model", "messages": messages, "max_tokens": 2}
+            self.assertEqual(
+                requests.post(url, json={**body, **extra}).status_code, 400
+            )
+
+
 class TestServerReleasesCaches(unittest.TestCase):
     def test_evicted_cache_of_a_finished_request_is_freed(self):
         prompt_cache = LRUPromptCache()

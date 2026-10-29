@@ -1380,6 +1380,7 @@ class APIHandler(BaseHTTPRequestHandler):
         self.seed = self.body.get("seed", None)
         self.stop = self.body.get("stop", None)
         self.chat_template_kwargs = self.body.get("chat_template_kwargs")
+        self.reasoning_effort = self.body.get("reasoning_effort")
         try:
             self.validate_model_parameters()
         except ValueError as e:
@@ -1387,6 +1388,13 @@ class APIHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"error": str(e)}).encode())
             return
+        # OpenAI clients send reasoning_effort as a top-level field. Give it to
+        # the chat template, unless chat_template_kwargs sets it.
+        if self.reasoning_effort is not None:
+            self.chat_template_kwargs = {
+                "reasoning_effort": self.reasoning_effort,
+                **(self.chat_template_kwargs or {}),
+            }
 
         # Get stop sequences
         stop_words = self.stop or []
@@ -1462,6 +1470,16 @@ class APIHandler(BaseHTTPRequestHandler):
             isinstance(w, str) for w in self.stop
         ):
             raise ValueError("stop must be a list of strings")
+
+        if self.chat_template_kwargs is not None and not isinstance(
+            self.chat_template_kwargs, dict
+        ):
+            raise ValueError("chat_template_kwargs must be an object")
+
+        if self.reasoning_effort is not None and not isinstance(
+            self.reasoning_effort, (str, int)
+        ):
+            raise ValueError("reasoning_effort must be a string or an integer")
 
     def generate_response(
         self,
