@@ -417,6 +417,10 @@ class TimeBudget:
             kind["loops"], kind["time"], kind["sync"] = 0, 0.0, 0.0
 
 
+class _RequestCancelled(Exception):
+    """The client went away while the prompt was processed."""
+
+
 class ModelProvider:
     def __init__(self, cli_args: argparse.Namespace):
         """Load models on demand and persist them across the whole process."""
@@ -1085,9 +1089,18 @@ class ResponseGenerator:
     def _serve_single(self, request, stream):
         rqueue, request, args = request
 
+        def stopped():
+            # Only rank 0 sees the client. All ranks must stop at the same step.
+            if not self._is_distributed:
+                return ctx._should_stop
+            flag = mx.array(int(ctx._should_stop), dtype=mx.int32)
+            return mx.distributed.all_sum(flag, stream=mx.cpu).item() > 0
+
         # Define the progress callback
         def progress(tokens_processed, tokens_total):
             rqueue.put((tokens_processed, tokens_total))
+            if stopped():
+                raise _RequestCancelled()
 
         try:
             # Load the model and tokenizer
@@ -1182,9 +1195,7 @@ class ResponseGenerator:
                 )
                 cache_key.append(gen.token)
 
-                if ctx._should_stop:
-                    if self._is_distributed:
-                        raise NotImplementedError()
+                if stopped():
                     break
 
                 if finish_reason is not None:
@@ -1197,6 +1208,8 @@ class ResponseGenerator:
                 self.model_provider.model_key, cache_key, cache
             )
 
+        except _RequestCancelled:
+            rqueue.put(None)
         except Exception as e:
             rqueue.put(e)
 
