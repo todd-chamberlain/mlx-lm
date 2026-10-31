@@ -883,6 +883,80 @@ class TestServerReleasesCaches(unittest.TestCase):
             response_generator.stop_and_join()
 
 
+class TestCancelledPromptIsKept(unittest.TestCase):
+    """A request cancelled while its prompt is processed keeps the processed
+    part in the prompt cache, so a retry of the prompt resumes there instead of
+    processing it again from the start."""
+
+    prompt = "one two three four five six seven eight " * 150
+
+    def setUp(self):
+        # Stopping the generator resets its model provider: one per test.
+        model_provider = DummyModelProvider()
+        model_provider.cli_args.prefill_step_size = 16
+        self.prompt_cache = LRUPromptCache()
+        self.response_generator = ResponseGenerator(model_provider, self.prompt_cache)
+
+    def tearDown(self):
+        self.response_generator.stop_and_join()
+
+    def arguments(self, seed):
+        return GenerationArguments(
+            model=ModelDescription("default_model", None, None),
+            sampling=SamplingArguments(0.0, 1.0, 0, 0.0, 0.0, 0.0),
+            logits=LogitsProcessorArguments(None, 1.0, 20, 0.0, 20, 0.0, 20),
+            stop_words=[],
+            max_tokens=4,
+            num_draft_tokens=3,
+            logprobs=False,
+            top_logprobs=0,
+            seed=seed,
+            chat_template_kwargs=None,
+        )
+
+    def retry_after_a_cancelled_prompt(self, seed):
+        request = CompletionRequest("text", self.prompt, [], None, None)
+        held = {}
+
+        class ClientLeft(Exception):
+            pass
+
+        def leave_once_begun(processed, total):
+            # As the HTTP handler does when its client goes away mid-prompt.
+            if 0 < processed < total:
+                held["ctx"].stop()
+                raise ClientLeft()
+
+        ctx, responses = self.response_generator.generate(
+            request, self.arguments(seed), progress_callback=leave_once_begun
+        )
+        held["ctx"] = ctx
+        with self.assertRaises(ClientLeft):
+            list(responses)
+
+        # The generation thread drops the request after the client left.
+        for _ in range(200):
+            if len(self.prompt_cache):
+                break
+            time.sleep(0.05)
+        self.assertEqual(len(self.prompt_cache), 1)
+
+        ctx, responses = self.response_generator.generate(request, self.arguments(seed))
+        self.assertTrue(list(responses))
+        return ctx
+
+    def test_single_request_path(self):
+        # A seed serves the request outside the batch.
+        ctx = self.retry_after_a_cancelled_prompt(seed=0)
+        self.assertGreater(ctx.prompt_cache_count, 0)
+        self.assertLess(ctx.prompt_cache_count, len(ctx.prompt))
+
+    def test_batched_path(self):
+        ctx = self.retry_after_a_cancelled_prompt(seed=None)
+        self.assertGreater(ctx.prompt_cache_count, 0)
+        self.assertLess(ctx.prompt_cache_count, len(ctx.prompt))
+
+
 class TestKeepalive(unittest.TestCase):
     def test_keepalive_callback(self):
         """Test keepalive callback sends SSE comments and handles errors"""

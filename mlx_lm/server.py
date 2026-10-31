@@ -420,6 +420,16 @@ class TimeBudget:
 class _RequestCancelled(Exception):
     """The client went away while the prompt was processed."""
 
+    def __init__(self, processed: int = 0):
+        super().__init__(processed)
+        self.processed = processed
+
+
+def _keeps_partial_prompt(ctx, n_tokens: int) -> bool:
+    """A cancelled request's cache of n_tokens tokens holds a part of its prompt
+    the prompt cache does not: kept, a retry of the prompt resumes there."""
+    return ctx.prompt_cache_count < n_tokens < len(ctx.prompt)
+
 
 class ModelProvider:
     def __init__(self, cli_args: argparse.Namespace):
@@ -1074,11 +1084,21 @@ class ResponseGenerator:
                 with self._time_budget.synchronizing():
                     uids_to_remove = self._share_object(uids_to_remove)
                 if uids_to_remove:
-                    batch_generator.remove(uids_to_remove)
+                    caches = batch_generator.remove(
+                        uids_to_remove, return_prompt_caches=True
+                    )
                     for uid in uids_to_remove:
                         # It may have already been removed during
                         # generation
-                        batch_results.pop(uid, None)
+                        result = batch_results.pop(uid, None)
+                        if result is None or uid not in caches:
+                            continue
+                        cache, tokens = caches[uid]
+                        if _keeps_partial_prompt(result["ctx"], len(tokens)):
+                            self.prompt_cache.insert_cache(
+                                current_model_key, tokens[:], cache
+                            )
+                    cache = caches = None
 
         # Make sure the model and prompt cache are destroyed in the generation
         # thread under same stream.
@@ -1100,7 +1120,8 @@ class ResponseGenerator:
         def progress(tokens_processed, tokens_total):
             rqueue.put((tokens_processed, tokens_total))
             if stopped():
-                raise _RequestCancelled()
+                # The cache now holds the tokens processed after the cached ones.
+                raise _RequestCancelled(tokens_processed)
 
         try:
             # Load the model and tokenizer
@@ -1208,8 +1229,13 @@ class ResponseGenerator:
                 self.model_provider.model_key, cache_key, cache
             )
 
-        except _RequestCancelled:
+        except _RequestCancelled as cancelled:
             rqueue.put(None)
+            n_tokens = ctx.prompt_cache_count + cancelled.processed
+            if _keeps_partial_prompt(ctx, n_tokens):
+                self.prompt_cache.insert_cache(
+                    self.model_provider.model_key, cache_key[:n_tokens], cache
+                )
         except Exception as e:
             rqueue.put(e)
 
